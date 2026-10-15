@@ -9,8 +9,10 @@ Le bouton **Copier la consigne pour Claude** dans ce dialogue copie un prompt pr
 2. Claude renvoie un objet JSON. Copiez-le (bloc ```json accepté tel quel).
 3. Dans le carnet : **Importer depuis Claude… → coller → Vérifier → Importer**.
 4. **Les images ne transitent pas par le JSON.** Ouvrez ensuite chaque fiche importée et joignez la capture
-   (bouton *Ajouter des captures*, collage Ctrl/Cmd+V, ou glisser-déposer). L'application ne dira jamais qu'une
-   capture est enregistrée tant qu'elle n'est pas réellement écrite dans la base locale.
+   (bouton *Ajouter des captures*, collage Ctrl/Cmd+V, ou glisser-déposer).
+5. Les fiches importées sont des **brouillons sur l'appareil** : envoyez-les à Claude (menu ⋯ → *Brouillons → Claude*) pour qu'il les publie dans le dépôt.
+
+Le plus simple reste d'envoyer directement la capture à Claude : il crée la fiche et la publie lui-même.
 
 ## Format
 

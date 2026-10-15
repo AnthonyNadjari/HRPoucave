@@ -1,37 +1,43 @@
 # Architecture
 
-Deux dépôts, un seul principe : **le code est public, les données sont privées.**
-
-* `HRPoucave` (public, GitHub Pages) : l'application, statique, sans build.
-* `CarnetData` (privé) : `incidents.json` + `images/`. Modifié par l'application via l'API GitHub Contents, avec un token fine-grained limité à ce dépôt.
+Un seul dépôt, public, servi par GitHub Pages. Le code est en clair ; les données sont chiffrées.
 
 ```
-index.html            coquille HTML (connexion, timeline, panneau de fiche, visionneuse, dialogues)
+index.html            coquille HTML (accès, timeline, panneau de fiche, visionneuse, dialogues)
 css/app.css           style (thème clair/sombre automatique, mobile first)
-js/store.js           modèle de données + lecture/écriture dans le dépôt privé (API Contents)
+js/store.js           lecture des données chiffrées + brouillons locaux (IndexedDB)
 js/importer.js        parsing du JSON produit par Claude + consigne à copier
 js/report.js          rapport HTML autonome (images intégrées en base64)
-js/app.js             interface (seule couche qui touche le DOM), ne parle qu'à store.js
+js/app.js             interface, ne parle qu'à store.js
+tools/carnet.mjs      publication des données chiffrées (Node 20+, sans dépendance)
+data/incidents.enc    fiches chiffrées
+data/img/<id>.enc     captures chiffrées (id aléatoire, sans information)
 .github/workflows/    miroir main → gh-pages
 ```
 
-## Flux des données
+## Chiffrement
 
-* **Connexion** : `GET /repos/{owner}/{repo}` vérifie le token, que le dépôt est privé et que le token peut écrire. Config (dépôt + token) dans `localStorage`.
-* **Lecture** : `GET /contents/incidents.json` (avec son `sha`), parsé en mémoire. Une copie est gardée dans `localStorage` pour un affichage immédiat et la lecture hors ligne.
-* **Écriture** : `PUT /contents/incidents.json` avec le `sha` courant. Un `409`/`422` signifie qu'un autre appareil a écrit entre-temps : on recharge, on ré-applique la mutation, on réessaie (3 tentatives). Chaque écriture = un commit lisible (« Ajoute fiche 2026-10-15 »).
-* **Images** : envoyées en base64 (`PUT /contents/images/...`), original + miniature JPEG 360 px générée dans le navigateur. La fiche ne référence l'image qu'après le succès des deux envois. Lecture avec `Accept: application/vnd.github.raw+json` (fonctionne au-delà de 1 Mo).
-* **Suppression** : `DELETE` des fichiers puis mise à jour de `incidents.json`. L'historique git conserve tout.
+* AES-GCM 256, IV aléatoire de 12 octets par fichier, format binaire `[iv | chiffré]`.
+* Clé de 32 octets aléatoires, encodée en base64url (43 caractères), transmise uniquement par le fragment d'URL `#k=…`. Le fragment n'est pas envoyé au serveur ; l'application le retire de la barre d'adresse et garde la clé dans `localStorage`.
+* Un mauvais lien est détecté (échec d'authentification GCM) et refusé.
 
-## Sécurité
+## Lecture
 
-* Le dépôt de données est privé : seuls le compte GitHub et les tokens autorisés y accèdent.
-* Le token est stocké dans le navigateur (`localStorage`). Quiconque a accès au navigateur déverrouillé peut lire les fiches : c'est le compromis choisi pour la simplicité. « Déconnecter ce navigateur » efface le token.
-* Limiter le token à `CarnetData` et à la permission *Contents*. Le révoquer sur GitHub s'il fuit.
-* L'application refuse un dépôt public.
+`fetch('data/incidents.enc')` puis déchiffrement en mémoire. Les captures sont téléchargées et déchiffrées à la demande (miniature `thumbId` si présente, sinon l'original).
+
+## Écriture
+
+GitHub Pages est statique et l'API GitHub exige un identifiant : le navigateur ne peut pas écrire dans le dépôt sans que l'utilisateur fournisse un token. Choix retenu :
+
+* Saisie dans l'application → **brouillon local** (IndexedDB, fiches et images), affiché avec un badge « non publié » et un bandeau. Jamais présenté comme enregistré sur GitHub.
+* Publication par Claude avec `tools/carnet.mjs` (`upsert`, `img`, `merge-drafts`), puis commit et push.
+* Au chargement, un brouillon dont l'id existe sur GitHub avec un `updatedAt` au moins aussi récent est supprimé de l'appareil (il a été publié).
+
+## Ce qui est public
+
+Le code, la taille des fichiers chiffrés, leur nombre et les dates de commit. Rien du contenu. Les messages de commit des données restent neutres.
 
 ## Limites
 
-* L'API Contents accepte des fichiers jusqu'à 100 Mo ; largement suffisant pour des captures.
-* Quota API GitHub : 5 000 requêtes/heure par token, sans rapport avec l'usage réel.
-* Pas de synchronisation temps réel : l'app recharge à l'ouverture, au retour sur l'onglet, et via « Actualiser ».
+* Perdre le lien d'accès rend les données illisibles. Le garder en favori ; Claude le demande pour publier.
+* Quiconque a accès au navigateur déverrouillé où le lien a été ouvert peut lire le carnet. Paramètres → *Oublier le lien sur cet appareil*.

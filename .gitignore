@@ -1,5 +1,6 @@
-# Jamais de données personnelles dans le dépôt
-
+# Jamais de clé ni de données en clair dans le dépôt
+*.key
+carnet-brouillons-*.json
 incidents-*.json
 rapport-*.html
 .DS_Store

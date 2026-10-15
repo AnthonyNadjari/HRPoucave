@@ -1,43 +1,39 @@
 # Carnet
 
 Carnet personnel pour documenter des incidents professionnels et retrouver instantanément les preuves associées.
-Interface statique sur GitHub Pages ; **les données vivent dans un dépôt GitHub privé à vous**, modifié directement par l'application via l'API GitHub. Tout est dans git, accessible depuis mobile et ordinateur.
+Tout est dans ce dépôt GitHub : le code, et les données **chiffrées** (`data/`). Le site est servi par GitHub Pages.
 
-Application : https://anthonynadjari.github.io/HRPoucave/
+Application : https://anthonynadjari.github.io/HRPoucave/ (s'ouvre avec le lien d'accès, voir plus bas)
 
-> Ce dépôt (public) ne contient que du code. Les fiches et captures sont dans un dépôt privé séparé (`CarnetData`).
+## Comment ça marche
 
-## Mise en route (2 minutes)
+* `data/incidents.enc` contient toutes les fiches ; `data/img/*.enc` les captures. Chiffrement AES-GCM 256.
+* La clé n'est **jamais** dans le dépôt. Elle est dans le lien d'accès (`…/HRPoucave/#k=…`). Ouvert une fois sur un appareil, le lien est retenu et la clé est retirée de la barre d'adresse. La partie après `#` n'est jamais envoyée à GitHub.
+* Sans la clé, le contenu de `data/` est illisible, même si le dépôt est public.
 
-1. Créer un dépôt **privé** : https://github.com/new → nom `CarnetData`, visibilité *Private*.
-2. Créer un token : https://github.com/settings/personal-access-tokens/new → *Fine-grained*, expiration la plus longue, *Only select repositories → CarnetData*, *Permissions → Contents → Read and write*.
-3. Ouvrir l'application, saisir `AnthonyNadjari/CarnetData` et le token, **Connecter**. Le token reste dans ce navigateur (à refaire sur chaque appareil).
+## Ajouter ou modifier des fiches
 
-L'application refuse de se connecter à un dépôt public.
+* **Par Claude (recommandé)** : envoyez la capture et quelques mots dans une conversation avec le lien d'accès. Claude structure la fiche et la publie avec `tools/carnet.mjs`.
+* **Depuis l'application** : *Nouveau*, collage d'une capture ou modification d'une fiche crée un **brouillon sur l'appareil**, signalé comme non publié. GitHub Pages ne permet pas d'écrire dans le dépôt sans identifiant. Menu ⋯ → *Brouillons → Claude* exporte les brouillons (avec captures) à envoyer à Claude, qui les publie. Une fois publiés, ils disparaissent de l'appareil.
 
 ## Fonctionnalités
 
-* **Ajout rapide** (`n`) : date, heure, contexte, catégorie, impact, faits observés, citations exactes, interprétation personnelle, témoins, mots-clés, conséquences.
-* **Preuves** : plusieurs captures par fiche (sélection, collage Ctrl/Cmd+V, glisser-déposer), dépliant « Preuves (n) » dans la timeline, visionneuse plein écran avec zoom et navigation.
-* **Timeline** : chronologie par mois, recherche plein texte insensible aux accents (`/`), filtres catégorie, impact, période, présence de preuves.
-* **Fiches** : faits, citations et interprétations visuellement distincts ; légende par capture ; état d'enregistrement explicite (« Enregistré dans le dépôt » n'apparaît qu'après le commit réussi).
-* **Rapport** : HTML chronologique autonome avec captures intégrées, option sans interprétations, imprimable en PDF.
-* **Import depuis Claude** : consigne à copier + import du JSON renvoyé ([docs/IMPORT_CLAUDE.md](docs/IMPORT_CLAUDE.md)).
-* **Hors ligne** : la dernière copie est affichée en lecture seule ; toute écriture impossible est signalée.
+* Timeline par mois, recherche plein texte insensible aux accents (`/`), filtres catégorie, impact, période, présence de preuves.
+* Fiches : faits observés, citations exactes et interprétation personnelle visuellement distincts ; témoins, mots-clés, conséquences.
+* Preuves : dépliant « Preuves (n) » dans chaque carte, visionneuse plein écran avec zoom, navigation clavier et balayage.
+* Rapport HTML chronologique autonome avec les captures intégrées, option sans interprétations, imprimable en PDF.
+* Import du JSON produit par Claude ([docs/IMPORT_CLAUDE.md](docs/IMPORT_CLAUDE.md)).
 
-## Stockage
+## Outil de publication
 
 ```
-CarnetData (privé)
-├── incidents.json           toutes les fiches (JSON lisible)
-└── images/
-    ├── <date>_<id>.<ext>      capture originale
-    └── <date>_<id>.thumb.jpg  miniature 360 px
+CARNET_KEY=<partie après #k=> node tools/carnet.mjs show
+CARNET_KEY=… node tools/carnet.mjs img <capture.png> <id-aléatoire>
+CARNET_KEY=… node tools/carnet.mjs upsert <fiches.json>
+CARNET_KEY=… node tools/carnet.mjs merge-drafts <carnet-brouillons-….json>
+git add data && git commit -m "Mise à jour des données" && git push
 ```
 
-Chaque enregistrement est un commit : l'historique git garde toutes les versions. Détails : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Les noms de fichiers d'images et les messages de commit restent neutres : ils sont publics.
 
-## Développement
-
-Aucun outil requis. Servir le dossier en HTTP (les modules ES ne se chargent pas en `file://`) : `python3 -m http.server 8000`.
-Déploiement : push sur `main` → le workflow reflète vers `gh-pages`, servie par GitHub Pages.
+Architecture détaillée : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

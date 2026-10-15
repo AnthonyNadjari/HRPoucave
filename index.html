@@ -22,21 +22,12 @@
 <section id="gate" class="gate" hidden>
   <div class="gate-card">
     <div class="wordmark"><span class="mark"></span>Carnet</div>
-    <div id="gate-connect" hidden>
-      <h1>Connecter le dépôt</h1>
-      <p class="lead">Les fiches et captures sont enregistrées dans un dépôt GitHub <strong>privé</strong>, à vous. L'application y lit et écrit directement : tout est dans git, accessible depuis tous vos appareils.</p>
-      <form id="form-connect" autocomplete="off">
-        <label>Dépôt privé <input name="repo" required placeholder="utilisateur/nom" value="AnthonyNadjari/CarnetData"></label>
-        <label>Token GitHub <input type="password" name="token" required autocomplete="off" placeholder="github_pat_…"></label>
-        <details class="howto">
-          <summary>Créer le dépôt et le token (2 minutes)</summary>
-          <ol>
-            <li><a href="https://github.com/new" target="_blank" rel="noopener">github.com/new</a> : nom <code>CarnetData</code>, visibilité <strong>Private</strong>, créer.</li>
-            <li><a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">Fine-grained token</a> : expiration la plus longue, <em>Repository access → Only select repositories → CarnetData</em>, <em>Permissions → Contents → Read and write</em>. Générer, copier.</li>
-            <li>Coller le token ci-dessus. Il reste dans ce navigateur uniquement.</li>
-          </ol>
-        </details>
-        <button class="btn primary" type="submit">Connecter</button>
+    <div id="gate-key" hidden>
+      <h1>Ouvrez votre lien d'accès</h1>
+      <p class="lead">Le carnet est enregistré dans GitHub, chiffré. Pour le lire sur cet appareil, ouvrez une fois le lien d'accès que Claude vous a donné. Il est ensuite retenu.</p>
+      <form id="form-key" autocomplete="off">
+        <label>Ou collez le lien ici <input name="link" id="in-link" placeholder="https://…/HRPoucave/#k=…"></label>
+        <button class="btn primary" type="submit">Ouvrir</button>
       </form>
     </div>
     <div id="gate-unsupported" hidden>
@@ -59,7 +50,8 @@
         <button data-action="import">Importer depuis Claude…</button>
         <button data-action="report">Exporter un rapport…</button>
         <hr>
-        <button data-action="refresh">Actualiser depuis le dépôt</button>
+        <button data-action="drafts">Brouillons → Claude…</button>
+        <button data-action="refresh">Actualiser</button>
         <button data-action="settings">Paramètres</button>
       </div>
     </div>
@@ -68,6 +60,10 @@
   <div id="sync-banner" class="banner" hidden>
     <span id="sync-banner-text"></span>
     <button class="btn small" data-action="refresh">Réessayer</button>
+  </div>
+  <div id="drafts-banner" class="banner" hidden>
+    <span id="drafts-banner-text"></span>
+    <button class="btn small" data-action="drafts">Envoyer à Claude</button>
   </div>
 
   <div class="filters">
@@ -84,7 +80,7 @@
 
   <div id="empty" class="empty" hidden>
     <p class="empty-title">Aucun incident enregistré.</p>
-    <p>Ajoutez une fiche avec <strong>Nouveau</strong>, collez une capture d'écran n'importe où sur la page, ou importez le JSON préparé par Claude (menu ⋯).</p>
+    <p>Envoyez vos captures et notes à Claude : il les publie ici. Vous pouvez aussi saisir une fiche avec <strong>Nouveau</strong> ; elle reste en brouillon sur cet appareil jusqu'à son envoi à Claude.</p>
   </div>
 </div>
 
@@ -139,7 +135,7 @@
             <label class="btn small"><input type="file" id="file-input" accept="image/*" multiple hidden>Ajouter des captures</label>
           </div>
         </div>
-        <p class="hint" id="attach-hint">Enregistrez d'abord la fiche pour y joindre des captures. Vous pourrez aussi coller une image (Ctrl/Cmd+V).</p>
+        <p class="hint" id="attach-hint"></p>
         <div id="attach-list" class="attach-list"></div>
         <div id="attach-progress" class="attach-progress" hidden></div>
       </section>
@@ -212,15 +208,29 @@
     <dl class="stats" id="stats"></dl>
     <details>
       <summary>Export JSON</summary>
-      <p class="hint">Copie de <code>incidents.json</code> tel qu'il est dans le dépôt (sans les images).</p>
-      <button type="button" class="btn small" id="btn-plain-export">Télécharger incidents.json</button>
+      <p class="hint">Toutes les fiches visibles, en clair, sans les images.</p>
+      <button type="button" class="btn small" id="btn-plain-export">Télécharger le JSON</button>
     </details>
     <details class="danger-zone">
-      <summary>Déconnecter ce navigateur</summary>
-      <p class="hint">Oublie le token et le cache local sur cet appareil. Les données restent dans le dépôt GitHub.</p>
-      <button type="button" class="btn danger small" id="btn-disconnect">Déconnecter</button>
+      <summary>Oublier le lien sur cet appareil</summary>
+      <p class="hint">Le carnet ne s'ouvrira plus ici sans le lien d'accès. Les données publiées restent sur GitHub. Les brouillons de cet appareil sont conservés.</p>
+      <button type="button" class="btn danger small" id="btn-forget">Oublier le lien</button>
     </details>
     <div class="dlg-actions"><button value="close" class="btn primary">Fermer</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlg-drafts" class="dlg">
+  <form method="dialog" class="dlg-inner">
+    <h2>Envoyer les brouillons à Claude</h2>
+    <p class="lead">Le site ne peut pas écrire sur GitHub lui-même. Les fiches saisies ici restent sur cet appareil tant que Claude ne les a pas publiées. Envoyez-les-lui dans une conversation : il les ajoute au dépôt, puis elles disparaissent d'ici comme brouillons.</p>
+    <p id="drafts-summary" class="hint"></p>
+    <div class="row">
+      <button type="button" class="btn primary small" id="btn-drafts-file">Télécharger avec les captures</button>
+      <button type="button" class="btn small" id="btn-drafts-copy">Copier le texte seul</button>
+    </div>
+    <p class="hint" id="drafts-state"></p>
+    <div class="dlg-actions"><button value="close" class="btn ghost">Fermer</button></div>
   </form>
 </dialog>
 

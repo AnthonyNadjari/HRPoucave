@@ -1,19 +1,15 @@
-// store.js — modèle de données + stockage dans un dépôt GitHub privé via l'API Contents.
-// L'interface (app.js) ne parle qu'à ce module.
+// store.js — données du carnet.
 //
-// Dépôt de données (privé) :
-//   incidents.json          { format, updatedAt, incidents: [...] }
-//   images/<id>.<ext>       capture originale
-//   images/<id>.thumb.jpg   miniature (360 px)
+// Source de vérité : le dépôt GitHub (servi par GitHub Pages), chiffré AES-GCM 256.
+//   data/incidents.enc      [iv(12) | chiffré] de { format, updatedAt, incidents: [...] }
+//   data/img/<id>.enc       [iv(12) | chiffré] des octets de l'image
+// La clé (32 octets, base64url) n'est jamais dans le dépôt : elle arrive par le lien
+// d'accès (#k=…), est retenue dans le navigateur, puis retirée de la barre d'adresse.
 //
-// Incident :
-// {
-//   id, createdAt, updatedAt, source: 'manuel' | 'import',
-//   date: 'AAAA-MM-JJ', time: 'HH:MM' | '',
-//   context, category, impact: 'faible'|'modere'|'eleve'|'critique', impactNotes,
-//   facts, quotes: [string], interpretation, witnesses: [string], tags: [string], evidenceNote,
-//   attachments: [{ id, path, thumbPath, sha, thumbSha, name, type, size, width, height, addedAt, caption }]
-// }
+// Le site ne peut pas écrire sur GitHub (aucun identifiant). Ce qui est saisi dans
+// l'application devient un BROUILLON local (IndexedDB), clairement signalé, qu'on envoie
+// à Claude pour publication (tools/carnet.mjs merge-drafts). Un brouillon publié disparaît
+// automatiquement au chargement suivant.
 
 export const CATEGORIES = [
   'Propos dévalorisants', 'Humiliation publique', 'Pression / surcharge', 'Instructions contradictoires',
@@ -23,138 +19,128 @@ export const IMPACTS = [
   { value: 'faible', label: 'Faible' }, { value: 'modere', label: 'Modéré' }, { value: 'eleve', label: 'Élevé' }, { value: 'critique', label: 'Critique' }
 ];
 
-const DATA_FORMAT = 'carnet-incidents/data/1';
-const DATA_FILE = 'incidents.json';
-const CFG_KEY = 'carnet.config';
-const CACHE_KEY = 'carnet.cache';
-
-let config = null;          // { owner, repo, branch, token }
-let incidents = new Map();
-let dataSha = null;         // sha git de incidents.json (nécessaire pour écrire)
-const blobCache = new Map(); // path -> object URL
+const KEY_LS = 'carnet.key.v1';
+let key = null;
+let remote = new Map();
+let drafts = new Map();
+let publishedAt = null;
+let loaded = false;
+const urlCache = new Map();
 const listeners = new Set();
-
 function emit(type, payload) { listeners.forEach(fn => { try { fn(type, payload); } catch (e) { console.error(e); } }); }
 export function subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); }
 
 export function uid() {
-  const b = new Uint8Array(8); crypto.getRandomValues(b);
+  const b = new Uint8Array(6); crypto.getRandomValues(b);
   return Date.now().toString(36) + '-' + Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
 }
 
-// ---------- configuration ----------
+// ---------- clé ----------
 
-export function getConfig() {
-  if (config) return config;
-  try { config = JSON.parse(localStorage.getItem(CFG_KEY)); } catch (_) { config = null; }
-  return config;
-}
-export function isConnected() { return !!(config && config.token); }
+function b64urlToBytes(s) { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; const bin = atob(s); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; }
+function bytesToB64(bytes) { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(s); }
+const KEY_RE = /(?:^|[#&?])k=([A-Za-z0-9_-]{43})/;
 
-export function parseRepo(text) {
-  const m = String(text || '').trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '').match(/^([\w.-]+)\/([\w.-]+)\/?$/);
-  if (!m) throw new Error('Dépôt attendu sous la forme utilisateur/nom.');
-  return { owner: m[1], repo: m[2] };
-}
+function lsGet(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (_) {} }
+function lsDel(k) { try { localStorage.removeItem(k); } catch (_) {} }
 
-export async function connect({ repo, token, branch = 'main' }) {
-  const { owner, repo: name } = parseRepo(repo);
-  const cfg = { owner, repo: name, branch, token: String(token || '').trim() };
-  if (!cfg.token) throw new Error('Token manquant.');
-  const r = await fetch(`${apiBase(cfg)}`, { headers: headers(cfg) });
-  if (r.status === 401) throw new Error('Token refusé (401). Vérifiez qu\'il est bien copié et non expiré.');
-  if (r.status === 404) throw new Error(`Dépôt ${owner}/${name} introuvable, ou token sans accès à ce dépôt.`);
-  if (!r.ok) throw new Error(`GitHub a répondu ${r.status}.`);
-  const info = await r.json();
-  if (info.private === false) throw new Error('Ce dépôt est PUBLIC : refusé. Les fiches doivent aller dans un dépôt privé.');
-  if (!info.permissions || !info.permissions.push) throw new Error('Le token ne permet pas d\'écrire dans ce dépôt (permission Contents : Read and write requise).');
-  cfg.branch = branch || info.default_branch || 'main';
-  config = cfg;
-  localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
-  await load();
-  emit('connected');
-}
+async function useKey(k) { key = await crypto.subtle.importKey('raw', b64urlToBytes(k), 'AES-GCM', false, ['decrypt']); }
 
-export function disconnect() {
-  config = null; incidents = new Map(); dataSha = null;
-  localStorage.removeItem(CFG_KEY); localStorage.removeItem(CACHE_KEY);
-  for (const u of blobCache.values()) URL.revokeObjectURL(u);
-  blobCache.clear();
-  emit('disconnected');
-}
-
-// ---------- API GitHub ----------
-
-function apiBase(cfg = config) { return `https://api.github.com/repos/${cfg.owner}/${cfg.repo}`; }
-function headers(cfg = config, extra = {}) {
-  return { Authorization: `Bearer ${cfg.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', ...extra };
-}
-function assertCfg() { if (!config || !config.token) throw new Error('Non connecté au dépôt.'); }
-
-async function apiJSON(method, path, body) {
-  assertCfg();
-  const r = await fetch(`${apiBase()}/contents/${encodePath(path)}${method === 'GET' ? `?ref=${encodeURIComponent(config.branch)}&t=${Date.now()}` : ''}`, {
-    method, headers: headers(config, body ? { 'Content-Type': 'application/json' } : {}), body: body ? JSON.stringify({ branch: config.branch, ...body }) : undefined
-  });
-  if (r.status === 404 && method === 'GET') return null;
-  if (!r.ok) {
-    let msg = `GitHub ${r.status}`;
-    try { const j = await r.json(); if (j.message) msg += ' : ' + j.message; } catch (_) {}
-    const e = new Error(msg); e.status = r.status; throw e;
+// Lit la clé dans le lien (puis l'efface de la barre d'adresse) ou dans la mémoire du navigateur.
+export async function init() {
+  const m = location.hash.match(KEY_RE);
+  if (m) {
+    lsSet(KEY_LS, m[1]);
+    history.replaceState(null, '', location.pathname + location.search);
   }
-  return r.json();
+  const k = (m && m[1]) || lsGet(KEY_LS);
+  if (!k) return false;
+  await useKey(k);
+  return true;
 }
-function encodePath(p) { return p.split('/').map(encodeURIComponent).join('/'); }
-
-function b64encode(bytes) { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(s); }
-function utf8ToB64(str) { return b64encode(new TextEncoder().encode(str)); }
-function b64ToUtf8(b64) { const s = atob(b64.replace(/\n/g, '')); const b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i); return new TextDecoder().decode(b); }
-
-// ---------- chargement / écriture de incidents.json ----------
-
-export function cachedIncidents() {
-  try { const c = JSON.parse(localStorage.getItem(CACHE_KEY)); return c && Array.isArray(c.incidents) ? c.incidents : []; } catch (_) { return []; }
+export async function setKeyFromLink(text) {
+  const m = String(text || '').match(KEY_RE);
+  if (!m) throw new Error('Ce lien ne contient pas de clé d\'accès (#k=…).');
+  await useKey(m[1]);
+  lsSet(KEY_LS, m[1]);
 }
+export function forgetKey() { lsDel(KEY_LS); key = null; remote = new Map(); loaded = false; }
+export function hasKey() { return !!key; }
+export function isLoaded() { return loaded; }
+export function getPublishedAt() { return publishedAt; }
+
+async function decrypt(packed) {
+  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: packed.slice(0, 12) }, key, packed.slice(12)));
+}
+async function fetchEncrypted(path) {
+  const r = await fetch(path + '?t=' + Date.now(), { cache: 'no-store' });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`GitHub a répondu ${r.status}`);
+  return new Uint8Array(await r.arrayBuffer());
+}
+
+// ---------- brouillons locaux (IndexedDB) ----------
+
+let idbP = null;
+function idb() {
+  if (idbP) return idbP;
+  idbP = new Promise((res, rej) => {
+    const q = indexedDB.open('carnet-brouillons', 1);
+    q.onupgradeneeded = () => { const d = q.result; d.createObjectStore('drafts', { keyPath: 'id' }); d.createObjectStore('images', { keyPath: 'id' }); };
+    q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+  });
+  return idbP;
+}
+async function idbReq(store, mode, fn) {
+  const d = await idb();
+  return new Promise((res, rej) => {
+    const t = d.transaction(store, mode); const r = fn(t.objectStore(store));
+    t.oncomplete = () => res(r && 'result' in r ? r.result : undefined);
+    t.onerror = () => rej(t.error); t.onabort = () => rej(t.error || new Error('Écriture locale annulée'));
+  });
+}
+const idbAll = s => idbReq(s, 'readonly', st => st.getAll());
+const idbGet = (s, id) => idbReq(s, 'readonly', st => st.get(id));
+const idbPut = (s, v) => idbReq(s, 'readwrite', st => st.put(v));
+const idbDel = (s, id) => idbReq(s, 'readwrite', st => st.delete(id));
+
+// ---------- chargement ----------
 
 export async function load() {
-  assertCfg();
-  const file = await apiJSON('GET', DATA_FILE);
+  if (!key) throw new Error('Lien d\'accès manquant.');
   let list = [];
-  if (file) {
-    dataSha = file.sha;
-    const text = file.content ? b64ToUtf8(file.content) : await (await fetch(file.download_url, { headers: headers() })).text();
-    try { const parsed = JSON.parse(text); list = Array.isArray(parsed) ? parsed : (parsed.incidents || []); }
-    catch (e) { throw new Error('incidents.json est illisible (JSON invalide). Corrigez-le dans le dépôt.'); }
-  } else { dataSha = null; }
-  incidents = new Map(list.map(x => normalizeIncident(x)).map(i => [i.id, i]));
-  localStorage.setItem(CACHE_KEY, JSON.stringify({ at: new Date().toISOString(), incidents: Array.from(incidents.values()) }));
+  const buf = await fetchEncrypted('data/incidents.enc');
+  if (buf) {
+    let plain;
+    try { plain = await decrypt(buf); } catch (_) { throw new Error('Ce lien d\'accès ne correspond pas aux données publiées.'); }
+    const d = JSON.parse(new TextDecoder().decode(plain));
+    list = d.incidents || []; publishedAt = d.updatedAt || null;
+  }
+  remote = new Map(list.map(normalizeIncident).map(i => [i.id, i]));
+  await loadDrafts(true);
+  loaded = true;
   emit('changed');
-  return incidents.size;
+  return remote.size;
 }
 
-function serialize() {
-  const list = Array.from(incidents.values()).sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')));
-  return JSON.stringify({ format: DATA_FORMAT, updatedAt: new Date().toISOString(), incidents: list }, null, 2) + '\n';
-}
-
-// Écrit incidents.json. En cas de conflit (fichier modifié ailleurs), recharge et ré-applique la mutation.
-async function commitData(message, mutate) {
-  assertCfg();
-  for (let attempt = 0; attempt < 3; attempt++) {
-    mutate();
-    try {
-      const res = await apiJSON('PUT', DATA_FILE, { message, content: utf8ToB64(serialize()), ...(dataSha ? { sha: dataSha } : {}) });
-      dataSha = res.content.sha;
-      localStorage.setItem(CACHE_KEY, JSON.stringify({ at: new Date().toISOString(), incidents: Array.from(incidents.values()) }));
-      return;
-    } catch (e) {
-      if ((e.status === 409 || e.status === 422) && attempt < 2) { await load(); continue; }
-      throw e;
+async function loadDrafts(purge) {
+  let all = [];
+  try { all = await idbAll('drafts'); } catch (e) { console.warn('brouillons indisponibles', e); }
+  drafts = new Map(all.map(d => [d.id, normalizeIncident(d)]));
+  if (!purge) return;
+  // Un brouillon publié par Claude (même id, version GitHub au moins aussi récente) est retiré.
+  for (const d of Array.from(drafts.values())) {
+    const r = remote.get(d.id);
+    if (r && r.updatedAt >= d.updatedAt) {
+      for (const a of d.attachments) if (a.local) await idbDel('images', a.id).catch(() => {});
+      await idbDel('drafts', d.id).catch(() => {});
+      drafts.delete(d.id);
     }
   }
 }
 
-// ---------- incidents ----------
+// ---------- modèle ----------
 
 export function normalizeIncident(x) {
   const arr = v => Array.isArray(v) ? v.map(s => String(s).trim()).filter(Boolean) : (typeof v === 'string' && v.trim() ? v.split(/\n|;|,/).map(s => s.trim()).filter(Boolean) : []);
@@ -176,123 +162,126 @@ export function normalizeIncident(x) {
     witnesses: arr(x.witnesses),
     tags: arr(x.tags),
     evidenceNote: str(x.evidenceNote),
-    attachments: Array.isArray(x.attachments) ? x.attachments.filter(a => a && typeof a === 'object' && a.path) : []
+    attachments: Array.isArray(x.attachments) ? x.attachments.filter(a => a && typeof a === 'object' && a.id) : []
   };
 }
 
-export function listIncidents() {
-  return Array.from(incidents.values()).sort((a, b) => (b.date + (b.time || '00:00')).localeCompare(a.date + (a.time || '00:00')) || b.createdAt.localeCompare(a.createdAt));
+function merged(id) {
+  const d = drafts.get(id), r = remote.get(id);
+  if (d) return { ...d, draft: true, published: !!r };
+  if (r) return { ...r, draft: false, published: true };
+  return null;
 }
-export function getIncident(id) { return incidents.get(id) || null; }
+export function listIncidents() {
+  const ids = new Set([...remote.keys(), ...drafts.keys()]);
+  return Array.from(ids, merged).filter(Boolean)
+    .sort((a, b) => (b.date + (b.time || '00:00')).localeCompare(a.date + (a.time || '00:00')) || b.createdAt.localeCompare(a.createdAt));
+}
+export function getIncident(id) { return merged(id); }
+export function listAttachments(id) { const i = merged(id); return i ? i.attachments : []; }
+export function draftCount() { return drafts.size; }
+
+function strip(inc) { const { draft, published, ...rest } = inc; return rest; }
+
+async function writeDraft(inc) {
+  const clean = normalizeIncident(strip(inc));
+  await idbPut('drafts', clean);
+  drafts.set(clean.id, clean);
+  emit('changed', clean.id);
+  return merged(clean.id);
+}
+async function ensureDraft(id) {
+  if (drafts.has(id)) return drafts.get(id);
+  const r = remote.get(id); if (!r) throw new Error('Fiche introuvable.');
+  return { ...r };
+}
 
 export async function saveIncident(data) {
-  const prev = data.id ? incidents.get(data.id) : null;
-  const inc = normalizeIncident({ ...(prev || {}), ...data, attachments: prev ? prev.attachments : (data.attachments || []), updatedAt: new Date().toISOString() });
+  const prev = data.id ? merged(data.id) : null;
+  const inc = { ...(prev ? strip(prev) : {}), ...data, attachments: prev ? prev.attachments : [], updatedAt: new Date().toISOString() };
   if (prev) inc.createdAt = prev.createdAt;
-  await commitData(`${prev ? 'Modifie' : 'Ajoute'} fiche ${inc.date}`, () => { incidents.set(inc.id, inc); });
-  emit('changed', inc.id);
-  return inc;
+  return writeDraft(inc);
 }
-
 export async function saveMany(list) {
-  const incs = list.map(x => normalizeIncident(x));
-  await commitData(`Importe ${incs.length} fiche(s)`, () => { incs.forEach(i => incidents.set(i.id, i)); });
-  emit('changed');
-  return incs;
+  const out = [];
+  for (const x of list) out.push(await writeDraft({ ...normalizeIncident(x), updatedAt: new Date().toISOString() }));
+  return out;
 }
-
-export async function deleteIncident(id) {
-  const inc = incidents.get(id);
-  if (!inc) return;
-  for (const a of inc.attachments) await deleteFile(a.path, a.sha).catch(e => console.warn('image non supprimée', a.path, e));
-  for (const a of inc.attachments) if (a.thumbPath) await deleteFile(a.thumbPath, a.thumbSha).catch(() => {});
-  await commitData(`Supprime fiche ${inc.date}`, () => { incidents.delete(id); });
+// Supprime le brouillon (et ses captures locales). Une fiche publiée redevient visible telle que sur GitHub.
+export async function discardDraft(id) {
+  const d = drafts.get(id); if (!d) return;
+  for (const a of d.attachments) if (a.local) await idbDel('images', a.id).catch(() => {});
+  await idbDel('drafts', id);
+  drafts.delete(id);
   emit('changed', id);
-}
-
-// ---------- fichiers / pièces jointes ----------
-
-async function putFile(path, bytes, message) {
-  // Récupère le sha si le fichier existe déjà (écrasement), sinon création.
-  let sha;
-  try { const ex = await apiJSON('GET', path); if (ex) sha = ex.sha; } catch (_) {}
-  const res = await apiJSON('PUT', path, { message, content: b64encode(bytes), ...(sha ? { sha } : {}) });
-  return res.content.sha;
-}
-async function deleteFile(path, sha) {
-  if (!sha) { const ex = await apiJSON('GET', path); if (!ex) return; sha = ex.sha; }
-  await apiJSON('DELETE', path, { message: `Supprime ${path}`, sha });
 }
 
 async function makeThumb(blob, max = 360) {
   try {
     const bmp = await createImageBitmap(blob);
-    const scale = Math.min(1, max / Math.max(bmp.width, bmp.height));
-    const w = Math.max(1, Math.round(bmp.width * scale)), h = Math.max(1, Math.round(bmp.height * scale));
-    const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
-    canvas.getContext('2d').drawImage(bmp, 0, 0, w, h);
-    const out = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.82));
-    return { thumb: new Uint8Array(await out.arrayBuffer()), width: bmp.width, height: bmp.height };
-  } catch (_) { return { thumb: null, width: 0, height: 0 }; }
+    return { width: bmp.width, height: bmp.height };
+  } catch (_) { return { width: 0, height: 0 }; }
 }
-
-export async function addAttachment(incidentId, file, caption = '') {
-  const inc = incidents.get(incidentId);
-  if (!inc) throw new Error('Fiche introuvable.');
+export async function addAttachment(incidentId, file) {
   if (!/^image\//.test(file.type)) throw new Error('Seules les images sont acceptées.');
+  const base = await ensureDraft(incidentId);
   const id = uid();
-  const ext = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif', 'image/heic': 'heic' })[file.type] || (file.name.split('.').pop() || 'bin').toLowerCase();
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const { thumb, width, height } = await makeThumb(file);
-  const path = `images/${inc.date}_${id}.${ext}`;
-  const sha = await putFile(path, bytes, `Ajoute capture ${file.name || path} (fiche ${inc.date})`);
-  let thumbPath = null, thumbSha = null;
-  if (thumb) { thumbPath = `images/${inc.date}_${id}.thumb.jpg`; thumbSha = await putFile(thumbPath, thumb, `Miniature ${path}`); }
-  const meta = { id, path, thumbPath, sha, thumbSha, name: file.name || path, type: file.type, size: bytes.length, width, height, addedAt: new Date().toISOString(), caption };
-  // La fiche ne référence l'image qu'une fois celle-ci réellement poussée.
-  await commitData(`Lie capture à la fiche ${inc.date}`, () => { const cur = incidents.get(incidentId); cur.attachments = [...cur.attachments.filter(a => a.id !== id), meta]; cur.updatedAt = new Date().toISOString(); });
-  emit('changed', incidentId);
+  const { width, height } = await makeThumb(file);
+  await idbPut('images', { id, blob: file });
+  const meta = { id, local: true, name: file.name || 'capture', type: file.type, size: file.size, width, height, addedAt: new Date().toISOString(), caption: '' };
+  await writeDraft({ ...base, attachments: [...base.attachments, meta], updatedAt: new Date().toISOString() });
   return meta;
 }
-
-export function listAttachments(incidentId) { const inc = incidents.get(incidentId); return inc ? inc.attachments : []; }
-export function getAttachmentMeta(incidentId, id) { return listAttachments(incidentId).find(a => a.id === id) || null; }
-
 export async function updateAttachmentCaption(incidentId, id, caption) {
-  await commitData(`Légende capture (fiche ${incidents.get(incidentId).date})`, () => { const a = getAttachmentMeta(incidentId, id); if (a) a.caption = caption; });
-  emit('changed', incidentId);
+  const base = await ensureDraft(incidentId);
+  await writeDraft({ ...base, attachments: base.attachments.map(a => a.id === id ? { ...a, caption } : a), updatedAt: new Date().toISOString() });
 }
-
 export async function removeAttachment(incidentId, id) {
-  const a = getAttachmentMeta(incidentId, id);
-  if (!a) return;
-  await deleteFile(a.path, a.sha);
-  if (a.thumbPath) await deleteFile(a.thumbPath, a.thumbSha).catch(() => {});
-  for (const p of [a.path, a.thumbPath]) if (p && blobCache.has(p)) { URL.revokeObjectURL(blobCache.get(p)); blobCache.delete(p); }
-  await commitData(`Retire capture (fiche ${incidents.get(incidentId).date})`, () => { const cur = incidents.get(incidentId); cur.attachments = cur.attachments.filter(x => x.id !== id); });
-  emit('changed', incidentId);
+  const base = await ensureDraft(incidentId);
+  const a = base.attachments.find(x => x.id === id);
+  if (!a || !a.local) throw new Error('Une capture publiée ne peut être retirée que par Claude.');
+  await writeDraft({ ...base, attachments: base.attachments.filter(x => x.id !== id), updatedAt: new Date().toISOString() });
+  await idbDel('images', id).catch(() => {});
+  if (urlCache.has(id)) { URL.revokeObjectURL(urlCache.get(id)); urlCache.delete(id); }
 }
 
-// Télécharge un fichier du dépôt (contenu brut) → Blob
-export async function getFileBlob(path, type = 'application/octet-stream') {
-  assertCfg();
-  const r = await fetch(`${apiBase()}/contents/${encodePath(path)}?ref=${encodeURIComponent(config.branch)}`, { headers: headers(config, { Accept: 'application/vnd.github.raw+json' }) });
-  if (!r.ok) throw new Error(`Image introuvable (${r.status}) : ${path}`);
-  return new Blob([await r.arrayBuffer()], { type });
+// ---------- images ----------
+
+async function remoteImage(id, type) {
+  const buf = await fetchEncrypted(`data/img/${id}.enc`);
+  if (!buf) throw new Error('Capture introuvable sur GitHub.');
+  return new Blob([await decrypt(buf)], { type });
 }
-export async function getFileURL(path, type) {
-  if (blobCache.has(path)) return blobCache.get(path);
-  const url = URL.createObjectURL(await getFileBlob(path, type));
-  blobCache.set(path, url);
+export async function getAttachmentBlob(a) {
+  if (a.local) { const r = await idbGet('images', a.id); if (!r) throw new Error('Capture locale introuvable.'); return r.blob; }
+  return remoteImage(a.id, a.type);
+}
+export async function getThumbURL(a) {
+  const k = a.local ? a.id : (a.thumbId || a.id);
+  if (urlCache.has(k)) return urlCache.get(k);
+  const blob = a.local ? await getAttachmentBlob(a) : await remoteImage(k, a.thumbId ? 'image/jpeg' : a.type);
+  const url = URL.createObjectURL(blob);
+  urlCache.set(k, url);
   return url;
 }
-export async function getThumbURL(a) { return getFileURL(a.thumbPath || a.path, a.thumbPath ? 'image/jpeg' : a.type); }
-export async function getAttachmentBlob(a) { return getFileBlob(a.path, a.type); }
 
-export function stats() {
-  let attachments = 0, attachBytes = 0;
-  for (const i of incidents.values()) for (const a of i.attachments) { attachments++; attachBytes += a.size || 0; }
-  return { incidents: incidents.size, attachments, attachBytes };
+// ---------- export pour Claude ----------
+
+export async function exportDrafts(withImages) {
+  const list = Array.from(drafts.values());
+  const images = {};
+  if (withImages) {
+    for (const d of list) for (const a of d.attachments) if (a.local) {
+      const r = await idbGet('images', a.id).catch(() => null);
+      if (r) images[a.id] = bytesToB64(new Uint8Array(await r.blob.arrayBuffer()));
+    }
+  }
+  return JSON.stringify({ format: 'carnet-incidents/drafts/1', exportedAt: new Date().toISOString(), incidents: list, ...(withImages ? { images } : {}) }, null, withImages ? 0 : 2);
 }
 
-export function exportPlainJSON() { return serialize(); }
+export function stats() {
+  let attachments = 0, attachBytes = 0, local = 0;
+  for (const i of listIncidents()) for (const a of i.attachments) { attachments++; attachBytes += a.size || 0; if (a.local) local++; }
+  return { incidents: listIncidents().length, published: remote.size, drafts: drafts.size, attachments, attachBytes, local, publishedAt };
+}
+export function exportPlainJSON() { return JSON.stringify({ format: 'carnet-incidents/plain/1', exportedAt: new Date().toISOString(), incidents: listIncidents().map(strip) }, null, 2); }

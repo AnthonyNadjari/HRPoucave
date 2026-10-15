@@ -30,31 +30,37 @@ function download(blob, filename) {
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 30000);
 }
 
-// ───────────────────────── Démarrage / connexion ─────────────────────────
+// ───────────────────────── Démarrage ─────────────────────────
 
-const supported = typeof fetch !== 'undefined' && typeof HTMLDialogElement !== 'undefined' && typeof localStorage !== 'undefined';
+const supported = typeof fetch !== 'undefined' && typeof HTMLDialogElement !== 'undefined' && typeof indexedDB !== 'undefined' && window.crypto && crypto.subtle;
 
 async function boot() {
   if (!supported) { $('#gate').hidden = false; $('#gate-unsupported').hidden = false; return; }
   populateSelects();
-  if (store.isConnected() || store.getConfig()) { enterApp(); }
-  else { showGate(); }
+  let ok = false;
+  try { ok = await store.init(); } catch (e) { console.error(e); }
+  if (ok) enterApp(); else showGate();
 }
-function showGate() { $('#app').hidden = true; $('#gate').hidden = false; $('#gate-connect').hidden = false; gateError(''); }
+function showGate(msg) { $('#app').hidden = true; $('#gate').hidden = false; $('#gate-key').hidden = false; gateError(msg || ''); }
 function gateError(msg) { const e = $('#gate-error'); e.textContent = msg || ''; e.hidden = !msg; }
 
-$('#form-connect').addEventListener('submit', async ev => {
+$('#form-key').addEventListener('submit', async ev => {
   ev.preventDefault();
-  const f = ev.target, btn = f.querySelector('button[type=submit]');
-  btn.disabled = true; btn.textContent = 'Connexion…'; gateError('');
-  try { await store.connect({ repo: f.repo.value, token: f.token.value }); f.token.value = ''; enterApp(); }
+  const btn = ev.target.querySelector('button[type=submit]'); btn.disabled = true; gateError('');
+  try { await store.setKeyFromLink($('#in-link').value); $('#in-link').value = ''; await enterApp(); }
   catch (e) { gateError(e.message); }
-  finally { btn.disabled = false; btn.textContent = 'Connecter'; }
+  finally { btn.disabled = false; }
+});
+
+// Lien d'accès ouvert dans un onglet déjà sur la page : le navigateur ne recharge pas, seule l'ancre change.
+window.addEventListener('hashchange', async () => {
+  if (!/k=/.test(location.hash)) return;
+  try { if (await store.init()) enterApp(); } catch (e) { showGate(e.message); }
 });
 
 async function enterApp() {
   $('#gate').hidden = true; $('#app').hidden = false;
-  render(); // affiche le cache local immédiatement
+  render();
   await refresh(false);
 }
 
@@ -63,12 +69,12 @@ async function refresh(verbose = true) {
   try {
     const n = await store.load();
     banner.hidden = true;
-    if (verbose) toast(`À jour : ${n} fiche(s) dans le dépôt.`, 'ok');
+    if (verbose) toast(`À jour : ${n} fiche(s) publiée(s) sur GitHub.`, 'ok');
   } catch (e) {
     console.error(e);
-    $('#sync-banner-text').textContent = 'Dépôt inaccessible : ' + e.message + ' — affichage de la dernière copie locale, enregistrement impossible.';
+    if (/lien d'accès/i.test(e.message)) { store.forgetKey(); showGate(e.message); return; }
+    $('#sync-banner-text').textContent = 'GitHub inaccessible : ' + e.message + '. Les brouillons de cet appareil restent disponibles.';
     banner.hidden = false;
-    if (/401|404|token/i.test(e.message)) { const cfg = store.getConfig(); if (cfg) $('#form-connect input[name=repo]').value = `${cfg.owner}/${cfg.repo}`; }
   }
   render();
 }
@@ -87,12 +93,7 @@ function populateSelects() {
 const filters = { q: '', category: '', impact: '', from: '', to: '', evidence: false };
 let visibleList = [];
 
-function currentList() {
-  const l = store.listIncidents();
-  if (l.length) return l;
-  // Avant le premier chargement réussi : cache local (lecture seule)
-  return store.cachedIncidents().map(store.normalizeIncident).sort((a, b) => (b.date + (b.time || '')).localeCompare(a.date + (a.time || '')));
-}
+function currentList() { return store.listIncidents(); }
 
 function matches(inc) {
   if (filters.category && inc.category !== filters.category) return false;
@@ -132,6 +133,9 @@ function render() {
   $('#btn-clear-filters').hidden = !active;
   $('#count').textContent = all.length ? (active ? `${visibleList.length} / ${all.length} incident(s)` : `${all.length} incident(s)`) : '';
   $('#empty').hidden = all.length > 0;
+  const nd = store.draftCount();
+  $('#drafts-banner').hidden = !nd;
+  $('#drafts-banner-text').textContent = nd ? `${nd} brouillon(s) sur cet appareil, pas encore sur GitHub.` : '';
   if (!visibleList.length) { tl.innerHTML = all.length ? '<p class="empty">Aucun incident ne correspond à ces critères.</p>' : ''; return; }
   let html = '', lastMonth = '';
   for (const inc of visibleList) {
@@ -143,7 +147,7 @@ function render() {
     html += `
 <article class="card" data-id="${inc.id}" tabindex="0">
   <div class="when"><span class="day">${d}</span><span class="dow">${dow}</span>${inc.time ? `<span class="time">${esc(inc.time)}</span>` : ''}</div>
-  <div class="head"><span class="pill">${esc(inc.category)}</span><span class="imp ${inc.impact}">${impactLabel(inc.impact)}</span>${inc.context ? `<span class="context">${highlight(inc.context)}</span>` : ''}${inc.source === 'import' && !inc.facts ? '<span class="source-import">import à compléter</span>' : ''}</div>
+  <div class="head"><span class="pill">${esc(inc.category)}</span><span class="imp ${inc.impact}">${impactLabel(inc.impact)}</span>${inc.context ? `<span class="context">${highlight(inc.context)}</span>` : ''}${inc.draft ? `<span class="badge-draft">${inc.published ? 'modifié ici, non publié' : 'brouillon, non publié'}</span>` : ''}</div>
   <div>
     ${inc.facts ? `<div class="facts">${highlight(inc.facts)}</div>` : '<div class="facts muted">Aucun fait saisi.</div>'}
     ${inc.quotes.length ? `<div class="quote">« ${highlight(inc.quotes[0])} »${inc.quotes.length > 1 ? ` <span class="hint">+${inc.quotes.length - 1}</span>` : ''}</div>` : ''}
@@ -215,7 +219,7 @@ function openNew(prefill = {}) {
 
 function openEdit(id) {
   const inc = store.getIncident(id);
-  if (!inc) { toast('Fiche en lecture seule tant que le dépôt n\'est pas joignable.', 'err'); return; }
+  if (!inc) return;
   currentId = id; pendingFiles = []; dirty = false;
   form.reset();
   form.date.value = inc.date; form.time.value = inc.time; form.context.value = inc.context;
@@ -225,8 +229,8 @@ function openEdit(id) {
   form.interpretation.value = inc.interpretation; form.witnesses.value = inc.witnesses.join(', '); form.tags.value = inc.tags.join(', ');
   form.impactNotes.value = inc.impactNotes; form.evidenceNote.value = inc.evidenceNote;
   $('#panel-title').textContent = 'Fiche du ' + inc.date.split('-').reverse().join('/');
-  $('#btn-delete').hidden = false;
-  setSaveState('Enregistré dans le dépôt');
+  updateDeleteButton(inc);
+  setSaveState(inc.draft ? 'Brouillon sur cet appareil' : 'Publié sur GitHub', inc.draft ? '' : 'ok');
   renderAttachments(); showPanel();
 }
 
@@ -255,15 +259,21 @@ function readForm() {
   };
 }
 
+function updateDeleteButton(inc) {
+  const b = $('#btn-delete');
+  b.hidden = !inc || !inc.draft;
+  b.textContent = inc && inc.published ? 'Annuler mes modifications' : 'Supprimer le brouillon';
+}
+
 form.addEventListener('submit', async ev => {
   ev.preventDefault();
-  const btn = $('#btn-save'); btn.disabled = true; setSaveState('Envoi vers le dépôt…');
+  const btn = $('#btn-save'); btn.disabled = true; setSaveState('Enregistrement…');
   try {
     const inc = await store.saveIncident(readForm());
     currentId = inc.id; dirty = false;
     $('#panel-title').textContent = 'Fiche du ' + inc.date.split('-').reverse().join('/');
-    $('#btn-delete').hidden = false;
-    setSaveState('Enregistré dans le dépôt à ' + nowHM(), 'ok');
+    updateDeleteButton(inc);
+    setSaveState('Brouillon enregistré sur cet appareil à ' + nowHM() + ' · pas encore sur GitHub', 'ok');
     if (pendingFiles.length) { const files = pendingFiles.map(f => f.file); pendingFiles.forEach(f => URL.revokeObjectURL(f.previewURL)); pendingFiles = []; await attachFiles(files); }
     else renderAttachments();
   } catch (e) {
@@ -273,24 +283,27 @@ form.addEventListener('submit', async ev => {
 
 $('#btn-delete').addEventListener('click', async () => {
   if (!currentId) return;
-  const n = store.listAttachments(currentId).length;
-  if (!await confirmDlg('Supprimer cette fiche ?', n ? `La fiche et ses ${n} capture(s) seront supprimées du dépôt (l'historique git les conserve).` : 'La fiche sera supprimée du dépôt (l\'historique git la conserve).', 'Supprimer')) return;
-  try { await store.deleteIncident(currentId); closePanel(true); toast('Fiche supprimée.'); }
-  catch (e) { toast('Suppression impossible : ' + e.message, 'err'); }
+  const inc = store.getIncident(currentId); if (!inc || !inc.draft) return;
+  const ok = inc.published
+    ? await confirmDlg('Annuler mes modifications ?', 'La fiche revient à sa version publiée sur GitHub. Les captures ajoutées ici seront perdues.', 'Annuler les modifications')
+    : await confirmDlg('Supprimer ce brouillon ?', 'Il n\'a jamais été publié : il sera perdu.', 'Supprimer');
+  if (!ok) return;
+  try { await store.discardDraft(currentId); if (inc.published) { openEdit(currentId); toast('Version publiée restaurée.'); } else { closePanel(true); toast('Brouillon supprimé.'); } }
+  catch (e) { toast('Impossible : ' + e.message, 'err'); }
 });
 
 async function renderAttachments() {
   const list = $('#attach-list'), hint = $('#attach-hint');
   const atts = currentId ? store.listAttachments(currentId) : [];
   $('#attach-count').textContent = atts.length ? `(${atts.length})` : '';
-  if (!currentId) hint.textContent = pendingFiles.length ? `${pendingFiles.length} capture(s) en attente : elles seront poussées dans le dépôt avec la fiche.` : 'Ajoutez des captures maintenant (elles partent avec la fiche), collez une image (Ctrl/Cmd+V) ou glissez-la ici.';
+  if (!currentId) hint.textContent = pendingFiles.length ? `${pendingFiles.length} capture(s) en attente : elles seront gardées avec le brouillon.` : 'Ajoutez des captures maintenant, collez une image (Ctrl/Cmd+V) ou glissez-la ici. Elles restent sur cet appareil jusqu\'à l\'envoi à Claude.';
   else hint.textContent = pendingFiles.length ? `${pendingFiles.length} capture(s) en attente.` : '';
   hint.hidden = !hint.textContent;
   list.innerHTML = atts.map((a, i) => `
 <div class="att" data-id="${a.id}">
   <div class="thumb" data-index="${i}"><img alt="${esc(a.name)}"></div>
   <input type="text" value="${esc(a.caption || '')}" placeholder="Légende (facultatif)" data-caption="${a.id}">
-  <div class="att-foot"><span>${fmtBytes(a.size)}</span><button type="button" data-remove="${a.id}">Retirer</button></div>
+  <div class="att-foot"><span>${a.local ? 'non publiée · ' : ''}${fmtBytes(a.size || 0)}</span>${a.local ? `<button type="button" data-remove="${a.id}">Retirer</button>` : ''}</div>
 </div>`).join('') + pendingFiles.map(f => `
 <div class="att pending"><div class="thumb"><img alt="" src="${f.previewURL}"></div><div class="att-foot"><span>En attente · ${fmtBytes(f.file.size)}</span><button type="button" data-unpend="${f.key}">Retirer</button></div></div>`).join('');
   for (let i = 0; i < atts.length; i++) {
@@ -301,7 +314,7 @@ async function renderAttachments() {
 $('#attach-list').addEventListener('click', async ev => {
   const rm = ev.target.closest('[data-remove]');
   if (rm) {
-    if (!await confirmDlg('Retirer cette capture ?', 'Elle sera supprimée du dépôt.', 'Retirer')) return;
+    if (!await confirmDlg('Retirer cette capture ?', 'Elle n\'a pas encore été publiée : elle sera perdue.', 'Retirer')) return;
     try { await store.removeAttachment(currentId, rm.dataset.remove); renderAttachments(); toast('Capture retirée.'); }
     catch (e) { toast('Impossible de retirer : ' + e.message, 'err'); }
     return;
@@ -313,7 +326,7 @@ $('#attach-list').addEventListener('click', async ev => {
 });
 $('#attach-list').addEventListener('change', async ev => {
   const inp = ev.target.closest('[data-caption]'); if (!inp) return;
-  try { await store.updateAttachmentCaption(currentId, inp.dataset.caption, inp.value.trim()); setSaveState('Légende enregistrée', 'ok'); }
+  try { await store.updateAttachmentCaption(currentId, inp.dataset.caption, inp.value.trim()); updateDeleteButton(store.getIncident(currentId)); setSaveState('Légende enregistrée sur cet appareil · pas encore sur GitHub', 'ok'); }
   catch (e) { toast('Légende non enregistrée : ' + e.message, 'err'); }
 });
 $('#attach-list').addEventListener('input', ev => ev.stopPropagation());
@@ -328,18 +341,18 @@ async function attachFiles(files) {
   const prog = $('#attach-progress'); prog.hidden = false;
   let ok = 0, failed = [];
   for (let i = 0; i < imgs.length; i++) {
-    prog.textContent = `Envoi de la capture ${i + 1} / ${imgs.length} vers le dépôt…`;
+    prog.textContent = `Enregistrement de la capture ${i + 1} / ${imgs.length} sur cet appareil…`;
     try { await store.addAttachment(currentId, imgs[i]); ok++; }
     catch (e) { console.error(e); failed.push((imgs[i].name || 'image') + ' (' + e.message + ')'); }
   }
-  prog.hidden = true; renderAttachments();
-  if (ok) toast(`${ok} capture(s) enregistrée(s) dans le dépôt.`, 'ok');
+  prog.hidden = true; renderAttachments(); updateDeleteButton(store.getIncident(currentId));
+  if (ok) { toast(`${ok} capture(s) gardée(s) sur cet appareil, à envoyer à Claude.`, 'ok'); setSaveState('Brouillon sur cet appareil · pas encore sur GitHub'); }
   if (failed.length) toast(`NON enregistrée(s) : ${failed.join(', ')}`, 'err');
 }
 $('#file-input').addEventListener('change', ev => { attachFiles(ev.target.files); ev.target.value = ''; });
 
 document.addEventListener('paste', ev => {
-  if (!store.isConnected()) return;
+  if (!store.hasKey() || $('#app').hidden) return;
   const items = Array.from(ev.clipboardData ? ev.clipboardData.items : []).filter(it => it.kind === 'file' && /^image\//.test(it.type));
   if (!items.length) return;
   if ($$('dialog[open]').length || !$('#lightbox').hidden) return;
@@ -414,11 +427,12 @@ document.addEventListener('click', ev => {
   if (a === 'import') openImport();
   else if (a === 'report') openReport();
   else if (a === 'refresh') refresh(true);
+  else if (a === 'drafts') openDrafts();
   else if (a === 'settings') openSettings();
 });
 $('#btn-new').addEventListener('click', () => openNew());
 document.addEventListener('keydown', ev => {
-  if (!store.isConnected()) return;
+  if (!store.hasKey() || $('#app').hidden) return;
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(ev.target.tagName) || ev.target.isContentEditable;
   if (ev.key === 'Escape') {
     if (!lb.hidden) { closeLightbox(); return; }
@@ -432,7 +446,7 @@ document.addEventListener('keydown', ev => {
   if (ev.key === '/') { ev.preventDefault(); $('#search').focus(); }
   else if (ev.key === 'n' && panel.hidden) { ev.preventDefault(); openNew(); }
 });
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && store.isConnected() && panel.hidden) refresh(false); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && store.hasKey() && !$('#app').hidden && panel.hidden) refresh(false); });
 
 // Import Claude
 let importItems = [];
@@ -456,7 +470,7 @@ $('#btn-import-go').addEventListener('click', async () => {
   try {
     const incs = await store.saveMany(importItems);
     $('#dlg-import').close();
-    toast(`${incs.length} fiche(s) enregistrée(s) dans le dépôt — captures à joindre manuellement.`, 'ok');
+    toast(`${incs.length} brouillon(s) créé(s) sur cet appareil, à envoyer à Claude.`, 'ok');
     render();
     if (incs.length === 1) openEdit(incs[0].id);
   } catch (e) { toast('Import NON enregistré : ' + e.message, 'err'); btn.disabled = false; }
@@ -490,16 +504,34 @@ $('#btn-report-go').addEventListener('click', async () => {
   finally { btn.disabled = false; updateReportCount(); }
 });
 
+// Brouillons → Claude
+function openDrafts() {
+  const n = store.draftCount();
+  const s2 = store.stats();
+  $('#drafts-summary').textContent = n ? `${n} brouillon(s), ${s2.local} capture(s) non publiée(s).` : 'Aucun brouillon sur cet appareil : tout est publié.';
+  $('#btn-drafts-file').disabled = !n; $('#btn-drafts-copy').disabled = !n; $('#drafts-state').textContent = '';
+  $('#dlg-drafts').showModal();
+}
+$('#btn-drafts-file').addEventListener('click', async () => {
+  try { download(new Blob([await store.exportDrafts(true)], { type: 'application/json' }), `carnet-brouillons-${stamp()}.json`); $('#drafts-state').textContent = 'Fichier téléchargé. Joignez-le à votre message pour Claude.'; }
+  catch (e) { $('#drafts-state').textContent = 'Échec : ' + e.message; }
+});
+$('#btn-drafts-copy').addEventListener('click', async () => {
+  const text = await store.exportDrafts(false);
+  try { await navigator.clipboard.writeText(text); $('#drafts-state').textContent = 'Texte copié. Collez-le à Claude et joignez les captures à part.'; }
+  catch (_) { $('#drafts-state').textContent = 'Copie refusée par le navigateur. Utilisez « Télécharger avec les captures ».'; }
+});
+
 // Paramètres
 function openSettings() {
-  const s = store.stats(), cfg = store.getConfig() || {};
-  $('#stats').innerHTML = `<dt>Dépôt</dt><dd><a href="https://github.com/${esc(cfg.owner)}/${esc(cfg.repo)}" target="_blank" rel="noopener">${esc(cfg.owner)}/${esc(cfg.repo)}</a> (${esc(cfg.branch || 'main')})</dd><dt>Fiches</dt><dd>${s.incidents}</dd><dt>Captures</dt><dd>${s.attachments} (${fmtBytes(s.attachBytes)})</dd>`;
+  const s2 = store.stats();
+  $('#stats').innerHTML = `<dt>Publiées sur GitHub</dt><dd>${s2.published}</dd><dt>Brouillons ici</dt><dd>${s2.drafts}</dd><dt>Captures</dt><dd>${s2.attachments} (${fmtBytes(s2.attachBytes)})</dd><dt>Dernière publication</dt><dd>${s2.publishedAt ? new Date(s2.publishedAt).toLocaleString('fr-FR') : 'aucune'}</dd>`;
   $('#dlg-settings').showModal();
 }
 $('#btn-plain-export').addEventListener('click', () => { try { download(new Blob([store.exportPlainJSON()], { type: 'application/json' }), `incidents-${stamp()}.json`); } catch (e) { toast(e.message, 'err'); } });
-$('#btn-disconnect').addEventListener('click', async () => {
-  if (!await confirmDlg('Déconnecter ce navigateur ?', 'Le token sera oublié ici. Les fiches restent dans le dépôt GitHub.', 'Déconnecter')) return;
-  $('#dlg-settings').close(); closePanel(true); store.disconnect(); showGate(); toast('Déconnecté.');
+$('#btn-forget').addEventListener('click', async () => {
+  if (!await confirmDlg('Oublier le lien ?', 'Il faudra rouvrir le lien d\'accès pour lire le carnet sur cet appareil.', 'Oublier')) return;
+  $('#dlg-settings').close(); closePanel(true); store.forgetKey(); showGate(); toast('Lien oublié sur cet appareil.');
 });
 $$('dialog').forEach(d => d.addEventListener('click', ev => { if (ev.target === d) d.close('cancel'); }));
 

@@ -312,3 +312,9 @@ summary.ev-toggle::-webkit-details-marker { display: none; }
 .gate details.howto summary { cursor: pointer; font-weight: 500; }
 .gate details.howto ol { margin: 10px 0 0; padding-left: 20px; color: var(--ink-2); }
 .gate details.howto li { margin-bottom: 6px; }
+
+/* ── Brouillons ── */
+.badge-draft { font-size: 11px; font-weight: 500; color: var(--interp-ink, #8a6d3b); background: var(--interp); border: 1px solid var(--interp-line); border-radius: 4px; padding: 1px 6px; }
+:root { --interp-ink: #8a6d3b; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --interp-ink: #cdb27a; } }
+:root[data-theme="dark"] { --interp-ink: #cdb27a; }
