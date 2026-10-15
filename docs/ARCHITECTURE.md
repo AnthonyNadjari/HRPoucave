@@ -53,7 +53,8 @@ ni un oubli de la phrase secrète (aucune récupération possible, par construct
 
 ## Déploiement
 
-GitHub Pages sert le contenu de la branche `main` à la racine. `.nojekyll` évite tout traitement Jekyll.
+GitHub Pages sert la branche `gh-pages`, qui est un simple miroir de `main` poussé par le workflow
+`.github/workflows/deploy.yml` à chaque push sur `main`. On ne modifie que `main`. `.nojekyll` évite tout traitement Jekyll.
 Les modules ES exigent un serveur HTTP : en local, `python3 -m http.server 8000` puis `http://localhost:8000/`.
 Aucune dépendance externe hormis les polices Google (facultatives : le site fonctionne avec les polices système si elles sont bloquées).
 
