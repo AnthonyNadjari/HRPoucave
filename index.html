@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#f7f5f1" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141413" media="(prefers-color-scheme: dark)">
+  <title>Carnet</title>
+  <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<!-- ───────── Écran de verrouillage / première ouverture ───────── -->
+<section id="gate" class="gate" hidden>
+  <div class="gate-card">
+    <div class="wordmark"><span class="mark"></span>Carnet</div>
+    <div id="gate-setup" hidden>
+      <h1>Créer votre carnet</h1>
+      <p class="lead">Les fiches et les captures restent sur cet appareil, chiffrées avec une phrase secrète. Rien n'est envoyé sur un serveur.</p>
+      <form id="form-setup" autocomplete="off">
+        <label>Phrase secrète <input type="password" name="pass" minlength="8" required autocomplete="new-password" placeholder="8 caractères minimum"></label>
+        <label>Confirmer <input type="password" name="pass2" minlength="8" required autocomplete="new-password"></label>
+        <p class="warn">Sans cette phrase, les données sont irrécupérables. Il n'existe aucun moyen de la réinitialiser.</p>
+        <button class="btn primary" type="submit">Créer le carnet</button>
+      </form>
+    </div>
+    <div id="gate-unlock" hidden>
+      <h1>Déverrouiller</h1>
+      <form id="form-unlock" autocomplete="off">
+        <label>Phrase secrète <input type="password" name="pass" required autocomplete="current-password" autofocus></label>
+        <button class="btn primary" type="submit">Ouvrir</button>
+      </form>
+      <p class="gate-foot"><button class="link" id="btn-gate-restore" type="button">Restaurer une sauvegarde sur un nouvel appareil</button></p>
+    </div>
+    <div id="gate-unsupported" hidden>
+      <h1>Navigateur non compatible</h1>
+      <p class="lead">Ce navigateur ne propose pas le stockage ou le chiffrement nécessaires. Utilisez une version récente de Safari, Chrome, Firefox ou Edge, hors navigation privée.</p>
+    </div>
+    <p class="gate-error" id="gate-error" role="alert" hidden></p>
+  </div>
+</section>
+
+<!-- ───────── Application ───────── -->
+<div id="app" class="app" hidden>
+  <header class="topbar">
+    <div class="wordmark"><span class="mark"></span>Carnet</div>
+    <label class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="search" type="search" placeholder="Rechercher (faits, citations, témoins, tags…)" autocomplete="off"><kbd>/</kbd></label>
+    <div class="topbar-actions">
+      <button class="btn primary" id="btn-new" title="Nouvel incident (n)"><span class="plus">+</span><span class="label">Nouveau</span></button>
+      <button class="btn icon" id="btn-menu" aria-haspopup="true" aria-expanded="false" title="Menu"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg></button>
+      <div class="menu" id="menu" hidden>
+        <button data-action="import">Importer depuis Claude…</button>
+        <button data-action="report">Exporter un rapport…</button>
+        <hr>
+        <button data-action="backup">Sauvegarder (fichier chiffré)</button>
+        <button data-action="restore">Restaurer une sauvegarde…</button>
+        <hr>
+        <button data-action="settings">Paramètres</button>
+        <button data-action="lock">Verrouiller</button>
+      </div>
+    </div>
+  </header>
+
+  <div id="backup-banner" class="banner" hidden>
+    <span id="backup-banner-text"></span>
+    <button class="btn small" data-action="backup">Sauvegarder maintenant</button>
+    <button class="btn ghost small" id="btn-banner-dismiss">Plus tard</button>
+  </div>
+
+  <div class="filters">
+    <select id="f-category"><option value="">Toutes catégories</option></select>
+    <select id="f-impact"><option value="">Tout impact</option></select>
+    <label class="date-range"><span>Du</span><input type="date" id="f-from"></label>
+    <label class="date-range"><span>au</span><input type="date" id="f-to"></label>
+    <label class="check"><input type="checkbox" id="f-evidence"> Avec preuves</label>
+    <button class="btn ghost small" id="btn-clear-filters" hidden>Effacer</button>
+    <span class="count" id="count"></span>
+  </div>
+
+  <main id="timeline" class="timeline"></main>
+
+  <div id="empty" class="empty" hidden>
+    <p class="empty-title">Aucun incident enregistré.</p>
+    <p>Ajoutez une fiche avec <strong>Nouveau</strong>, ou collez une capture d'écran n'importe où sur la page pour créer une fiche avec cette preuve.</p>
+  </div>
+</div>
+
+<!-- ───────── Fiche détaillée (panneau latéral) ───────── -->
+<aside id="panel" class="panel" hidden aria-label="Fiche incident">
+  <form id="form-incident" class="panel-inner" autocomplete="off">
+    <header class="panel-head">
+      <button type="button" class="btn icon" id="btn-panel-close" title="Fermer (Échap)">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+      <h2 id="panel-title">Nouvel incident</h2>
+      <span class="save-state" id="save-state" aria-live="polite"></span>
+    </header>
+
+    <div class="panel-body">
+      <div class="grid-2">
+        <label>Date <input type="date" name="date" required></label>
+        <label>Heure <input type="time" name="time"></label>
+      </div>
+      <label>Contexte <input name="context" placeholder="Lieu, réunion, canal (ex. : point hebdo Teams, open space)"></label>
+      <div class="grid-2">
+        <label>Catégorie <select name="category"></select></label>
+        <label>Impact <select name="impact"></select></label>
+      </div>
+
+      <fieldset class="facts">
+        <legend>Faits observés</legend>
+        <textarea name="facts" rows="4" placeholder="Ce qui s'est passé, observable, au passé, sans jugement."></textarea>
+      </fieldset>
+
+      <fieldset class="quotes">
+        <legend>Citations exactes <span class="hint">une par ligne, mot pour mot</span></legend>
+        <textarea name="quotes" rows="3" placeholder="« … »"></textarea>
+      </fieldset>
+
+      <fieldset class="interp">
+        <legend>Interprétation personnelle <span class="hint">ressenti, hypothèses — distinct des faits</span></legend>
+        <textarea name="interpretation" rows="3" placeholder="Comment je l'ai vécu, ce que j'en comprends."></textarea>
+      </fieldset>
+
+      <div class="grid-2">
+        <label>Témoins <span class="hint">séparés par des virgules</span><input name="witnesses" placeholder="Prénom N., …"></label>
+        <label>Mots-clés <span class="hint">séparés par des virgules</span><input name="tags" placeholder="projet, réunion, …"></label>
+      </div>
+      <label>Conséquences concrètes <input name="impactNotes" placeholder="Travail refait, retard, stress, arrêt…"></label>
+      <label>Preuve à joindre (mémo) <input name="evidenceNote" placeholder="ex. : capture Teams du 12/03 à 10h32, mail du 14/03"></label>
+
+      <section class="attachments">
+        <div class="attach-head">
+          <h3>Preuves <span id="attach-count"></span></h3>
+          <div class="attach-actions">
+            <label class="btn small"><input type="file" id="file-input" accept="image/*" multiple hidden>Ajouter des captures</label>
+          </div>
+        </div>
+        <p class="hint" id="attach-hint">Enregistrez d'abord la fiche pour y joindre des captures. Vous pourrez aussi coller une image (Ctrl/Cmd+V).</p>
+        <div id="attach-list" class="attach-list"></div>
+        <div id="attach-progress" class="attach-progress" hidden></div>
+      </section>
+    </div>
+
+    <footer class="panel-foot">
+      <button type="button" class="btn danger ghost" id="btn-delete" hidden>Supprimer</button>
+      <span class="spacer"></span>
+      <button type="submit" class="btn primary" id="btn-save">Enregistrer</button>
+    </footer>
+  </form>
+</aside>
+<div id="scrim" class="scrim" hidden></div>
+
+<!-- ───────── Visionneuse ───────── -->
+<div id="lightbox" class="lightbox" hidden role="dialog" aria-label="Capture">
+  <div class="lb-top">
+    <span id="lb-caption"></span>
+    <span class="spacer"></span>
+    <button class="btn icon light" id="lb-download" title="Télécharger"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12m0 0 5-5m-5 5-5-5M4 20h16"/></svg></button>
+    <button class="btn icon light" id="lb-close" title="Fermer (Échap)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+  <button class="lb-nav prev" id="lb-prev" aria-label="Précédente">‹</button>
+  <div class="lb-stage" id="lb-stage"><img id="lb-img" alt=""></div>
+  <button class="lb-nav next" id="lb-next" aria-label="Suivante">›</button>
+  <div class="lb-bottom"><span id="lb-index"></span><span class="hint">Cliquer pour zoomer · ← → pour naviguer</span></div>
+</div>
+
+<!-- ───────── Dialogues ───────── -->
+<dialog id="dlg-import" class="dlg">
+  <form method="dialog" class="dlg-inner">
+    <h2>Importer depuis Claude</h2>
+    <p class="lead">1. Copiez le modèle de consigne, collez-le dans Claude avec votre capture ou votre note.<br>2. Collez ici le JSON renvoyé. Les fiches sont créées ; <strong>les captures ne transitent pas par ce JSON</strong> — vous les joignez ensuite à chaque fiche.</p>
+    <div class="row"><button type="button" class="btn small" id="btn-copy-prompt">Copier la consigne pour Claude</button><span class="hint" id="copy-state"></span></div>
+    <textarea id="import-text" rows="10" placeholder='{ "format": "carnet-incidents/import/1", "incidents": [ … ] }'></textarea>
+    <div id="import-preview" class="import-preview" hidden></div>
+    <div class="dlg-actions">
+      <button value="cancel" class="btn ghost">Annuler</button>
+      <button type="button" class="btn" id="btn-import-preview">Vérifier</button>
+      <button type="button" class="btn primary" id="btn-import-go" disabled>Importer</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-report" class="dlg">
+  <form method="dialog" class="dlg-inner">
+    <h2>Exporter un rapport</h2>
+    <p class="lead">Rapport chronologique autonome (HTML), à ouvrir puis imprimer ou enregistrer en PDF.</p>
+    <label>Titre <input id="rep-title" value="Chronologie des incidents"></label>
+    <label>Auteur <span class="hint">facultatif</span><input id="rep-author" placeholder="Votre nom"></label>
+    <div class="grid-2">
+      <label>Du <input type="date" id="rep-from"></label>
+      <label>Au <input type="date" id="rep-to"></label>
+    </div>
+    <label class="check"><input type="checkbox" id="rep-images" checked> Intégrer les captures</label>
+    <label class="check"><input type="checkbox" id="rep-interp" checked> Inclure les interprétations personnelles</label>
+    <label class="check"><input type="checkbox" id="rep-filtered"> Limiter aux incidents actuellement filtrés</label>
+    <p class="hint" id="rep-count"></p>
+    <div class="dlg-actions">
+      <button value="cancel" class="btn ghost">Annuler</button>
+      <button type="button" class="btn primary" id="btn-report-go">Générer</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-restore" class="dlg">
+  <form method="dialog" class="dlg-inner">
+    <h2>Restaurer une sauvegarde</h2>
+    <p class="lead">Fichier <code>.carnet</code> produit par « Sauvegarder ». La phrase secrète utilisée au moment de la sauvegarde est nécessaire.</p>
+    <label>Fichier <input type="file" id="restore-file" accept=".carnet,application/json"></label>
+    <label>Phrase secrète de la sauvegarde <input type="password" id="restore-pass" autocomplete="off"></label>
+    <label class="check"><input type="radio" name="restore-mode" value="merge" checked> Fusionner avec les fiches existantes</label>
+    <label class="check"><input type="radio" name="restore-mode" value="replace"> Remplacer tout le contenu actuel</label>
+    <p class="hint" id="restore-state"></p>
+    <div class="dlg-actions">
+      <button value="cancel" class="btn ghost">Annuler</button>
+      <button type="button" class="btn primary" id="btn-restore-go">Restaurer</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-settings" class="dlg">
+  <form method="dialog" class="dlg-inner">
+    <h2>Paramètres</h2>
+    <dl class="stats" id="stats"></dl>
+    <label>Verrouillage automatique après inactivité
+      <select id="set-lock">
+        <option value="5">5 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="60">1 heure</option><option value="0">Jamais (déconseillé)</option>
+      </select>
+    </label>
+    <details>
+      <summary>Changer la phrase secrète</summary>
+      <label>Phrase actuelle <input type="password" id="pp-old" autocomplete="off"></label>
+      <label>Nouvelle phrase <input type="password" id="pp-new" minlength="8" autocomplete="off"></label>
+      <label>Confirmer <input type="password" id="pp-new2" minlength="8" autocomplete="off"></label>
+      <button type="button" class="btn small" id="btn-pp-go">Modifier</button>
+      <span class="hint" id="pp-state"></span>
+    </details>
+    <details>
+      <summary>Export en clair (JSON)</summary>
+      <p class="hint">Fiches sans images, non chiffrées. À réserver à une migration ou une analyse, sur un appareil sûr.</p>
+      <button type="button" class="btn small" id="btn-plain-export">Télécharger le JSON en clair</button>
+    </details>
+    <details class="danger-zone">
+      <summary>Effacer tout le carnet</summary>
+      <p class="hint">Supprime définitivement toutes les fiches et captures de cet appareil. Faites une sauvegarde avant.</p>
+      <button type="button" class="btn danger small" id="btn-wipe">Effacer définitivement</button>
+    </details>
+    <div class="dlg-actions"><button value="close" class="btn primary">Fermer</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlg-confirm" class="dlg small">
+  <form method="dialog" class="dlg-inner">
+    <h2 id="confirm-title">Confirmer</h2>
+    <p id="confirm-text" class="lead"></p>
+    <div class="dlg-actions">
+      <button value="cancel" class="btn ghost">Annuler</button>
+      <button value="ok" class="btn danger" id="confirm-ok">Confirmer</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

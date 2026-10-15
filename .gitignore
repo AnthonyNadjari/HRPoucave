@@ -1,0 +1,5 @@
+# Jamais de données personnelles dans le dépôt
+*.carnet
+carnet-*.json
+rapport-*.html
+.DS_Store
