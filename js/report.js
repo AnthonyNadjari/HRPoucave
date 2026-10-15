@@ -34,7 +34,7 @@ export async function buildReport(options) {
       const figs = [];
       for (const a of atts) {
         try {
-          const url = await blobToDataURL(await store.getAttachmentBlob(a.id));
+          const url = await blobToDataURL(await store.getAttachmentBlob(a));
           figs.push(`<figure><img src="${url}" alt="${esc(a.name)}"><figcaption>Pièce ${esc(a.name)}${a.caption ? ' — ' + esc(a.caption) : ''}</figcaption></figure>`);
         } catch (e) { figs.push(`<p class="muted">Pièce ${esc(a.name)} : illisible.</p>`); }
       }

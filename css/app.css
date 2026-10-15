@@ -306,3 +306,9 @@ summary.ev-toggle::-webkit-details-marker { display: none; }
   .lb-nav { width: 36px; height: 52px; font-size: 26px; }
 }
 @media (hover: none) { .card:hover { box-shadow: none; } }
+
+/* ── Aide de connexion ── */
+.gate details.howto { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 4px 0 14px; font-size: 13.5px; }
+.gate details.howto summary { cursor: pointer; font-weight: 500; }
+.gate details.howto ol { margin: 10px 0 0; padding-left: 20px; color: var(--ink-2); }
+.gate details.howto li { margin-bottom: 6px; }

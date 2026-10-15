@@ -18,31 +18,30 @@
 </head>
 <body>
 
-<!-- ───────── Écran de verrouillage / première ouverture ───────── -->
+<!-- ───────── Écran de connexion au dépôt ───────── -->
 <section id="gate" class="gate" hidden>
   <div class="gate-card">
     <div class="wordmark"><span class="mark"></span>Carnet</div>
-    <div id="gate-setup" hidden>
-      <h1>Créer votre carnet</h1>
-      <p class="lead">Les fiches et les captures restent sur cet appareil, chiffrées avec une phrase secrète. Rien n'est envoyé sur un serveur.</p>
-      <form id="form-setup" autocomplete="off">
-        <label>Phrase secrète <input type="password" name="pass" minlength="8" required autocomplete="new-password" placeholder="8 caractères minimum"></label>
-        <label>Confirmer <input type="password" name="pass2" minlength="8" required autocomplete="new-password"></label>
-        <p class="warn">Sans cette phrase, les données sont irrécupérables. Il n'existe aucun moyen de la réinitialiser.</p>
-        <button class="btn primary" type="submit">Créer le carnet</button>
+    <div id="gate-connect" hidden>
+      <h1>Connecter le dépôt</h1>
+      <p class="lead">Les fiches et captures sont enregistrées dans un dépôt GitHub <strong>privé</strong>, à vous. L'application y lit et écrit directement : tout est dans git, accessible depuis tous vos appareils.</p>
+      <form id="form-connect" autocomplete="off">
+        <label>Dépôt privé <input name="repo" required placeholder="utilisateur/nom" value="AnthonyNadjari/CarnetData"></label>
+        <label>Token GitHub <input type="password" name="token" required autocomplete="off" placeholder="github_pat_…"></label>
+        <details class="howto">
+          <summary>Créer le dépôt et le token (2 minutes)</summary>
+          <ol>
+            <li><a href="https://github.com/new" target="_blank" rel="noopener">github.com/new</a> : nom <code>CarnetData</code>, visibilité <strong>Private</strong>, créer.</li>
+            <li><a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">Fine-grained token</a> : expiration la plus longue, <em>Repository access → Only select repositories → CarnetData</em>, <em>Permissions → Contents → Read and write</em>. Générer, copier.</li>
+            <li>Coller le token ci-dessus. Il reste dans ce navigateur uniquement.</li>
+          </ol>
+        </details>
+        <button class="btn primary" type="submit">Connecter</button>
       </form>
-    </div>
-    <div id="gate-unlock" hidden>
-      <h1>Déverrouiller</h1>
-      <form id="form-unlock" autocomplete="off">
-        <label>Phrase secrète <input type="password" name="pass" required autocomplete="current-password" autofocus></label>
-        <button class="btn primary" type="submit">Ouvrir</button>
-      </form>
-      <p class="gate-foot"><button class="link" id="btn-gate-restore" type="button">Restaurer une sauvegarde sur un nouvel appareil</button></p>
     </div>
     <div id="gate-unsupported" hidden>
       <h1>Navigateur non compatible</h1>
-      <p class="lead">Ce navigateur ne propose pas le stockage ou le chiffrement nécessaires. Utilisez une version récente de Safari, Chrome, Firefox ou Edge, hors navigation privée.</p>
+      <p class="lead">Utilisez une version récente de Safari, Chrome, Firefox ou Edge.</p>
     </div>
     <p class="gate-error" id="gate-error" role="alert" hidden></p>
   </div>
@@ -60,19 +59,15 @@
         <button data-action="import">Importer depuis Claude…</button>
         <button data-action="report">Exporter un rapport…</button>
         <hr>
-        <button data-action="backup">Sauvegarder (fichier chiffré)</button>
-        <button data-action="restore">Restaurer une sauvegarde…</button>
-        <hr>
+        <button data-action="refresh">Actualiser depuis le dépôt</button>
         <button data-action="settings">Paramètres</button>
-        <button data-action="lock">Verrouiller</button>
       </div>
     </div>
   </header>
 
-  <div id="backup-banner" class="banner" hidden>
-    <span id="backup-banner-text"></span>
-    <button class="btn small" data-action="backup">Sauvegarder maintenant</button>
-    <button class="btn ghost small" id="btn-banner-dismiss">Plus tard</button>
+  <div id="sync-banner" class="banner" hidden>
+    <span id="sync-banner-text"></span>
+    <button class="btn small" data-action="refresh">Réessayer</button>
   </div>
 
   <div class="filters">
@@ -89,7 +84,7 @@
 
   <div id="empty" class="empty" hidden>
     <p class="empty-title">Aucun incident enregistré.</p>
-    <p>Ajoutez une fiche avec <strong>Nouveau</strong>, ou collez une capture d'écran n'importe où sur la page pour créer une fiche avec cette preuve.</p>
+    <p>Ajoutez une fiche avec <strong>Nouveau</strong>, collez une capture d'écran n'importe où sur la page, ou importez le JSON préparé par Claude (menu ⋯).</p>
   </div>
 </div>
 
@@ -210,48 +205,20 @@
   </form>
 </dialog>
 
-<dialog id="dlg-restore" class="dlg">
-  <form method="dialog" class="dlg-inner">
-    <h2>Restaurer une sauvegarde</h2>
-    <p class="lead">Fichier <code>.carnet</code> produit par « Sauvegarder ». La phrase secrète utilisée au moment de la sauvegarde est nécessaire.</p>
-    <label>Fichier <input type="file" id="restore-file" accept=".carnet,application/json"></label>
-    <label>Phrase secrète de la sauvegarde <input type="password" id="restore-pass" autocomplete="off"></label>
-    <label class="check"><input type="radio" name="restore-mode" value="merge" checked> Fusionner avec les fiches existantes</label>
-    <label class="check"><input type="radio" name="restore-mode" value="replace"> Remplacer tout le contenu actuel</label>
-    <p class="hint" id="restore-state"></p>
-    <div class="dlg-actions">
-      <button value="cancel" class="btn ghost">Annuler</button>
-      <button type="button" class="btn primary" id="btn-restore-go">Restaurer</button>
-    </div>
-  </form>
-</dialog>
 
 <dialog id="dlg-settings" class="dlg">
   <form method="dialog" class="dlg-inner">
     <h2>Paramètres</h2>
     <dl class="stats" id="stats"></dl>
-    <label>Verrouillage automatique après inactivité
-      <select id="set-lock">
-        <option value="5">5 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="60">1 heure</option><option value="0">Jamais (déconseillé)</option>
-      </select>
-    </label>
     <details>
-      <summary>Changer la phrase secrète</summary>
-      <label>Phrase actuelle <input type="password" id="pp-old" autocomplete="off"></label>
-      <label>Nouvelle phrase <input type="password" id="pp-new" minlength="8" autocomplete="off"></label>
-      <label>Confirmer <input type="password" id="pp-new2" minlength="8" autocomplete="off"></label>
-      <button type="button" class="btn small" id="btn-pp-go">Modifier</button>
-      <span class="hint" id="pp-state"></span>
-    </details>
-    <details>
-      <summary>Export en clair (JSON)</summary>
-      <p class="hint">Fiches sans images, non chiffrées. À réserver à une migration ou une analyse, sur un appareil sûr.</p>
-      <button type="button" class="btn small" id="btn-plain-export">Télécharger le JSON en clair</button>
+      <summary>Export JSON</summary>
+      <p class="hint">Copie de <code>incidents.json</code> tel qu'il est dans le dépôt (sans les images).</p>
+      <button type="button" class="btn small" id="btn-plain-export">Télécharger incidents.json</button>
     </details>
     <details class="danger-zone">
-      <summary>Effacer tout le carnet</summary>
-      <p class="hint">Supprime définitivement toutes les fiches et captures de cet appareil. Faites une sauvegarde avant.</p>
-      <button type="button" class="btn danger small" id="btn-wipe">Effacer définitivement</button>
+      <summary>Déconnecter ce navigateur</summary>
+      <p class="hint">Oublie le token et le cache local sur cet appareil. Les données restent dans le dépôt GitHub.</p>
+      <button type="button" class="btn danger small" id="btn-disconnect">Déconnecter</button>
     </details>
     <div class="dlg-actions"><button value="close" class="btn primary">Fermer</button></div>
   </form>

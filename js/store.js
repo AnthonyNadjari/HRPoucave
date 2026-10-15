@@ -1,152 +1,157 @@
-// store.js — modèle de données + glue chiffrement/IndexedDB.
-// Seule couche qui manipule des données en clair. L'interface (app.js) ne parle qu'à ce module.
+// store.js — modèle de données + stockage dans un dépôt GitHub privé via l'API Contents.
+// L'interface (app.js) ne parle qu'à ce module.
 //
-// Incident (en clair, en mémoire) :
+// Dépôt de données (privé) :
+//   incidents.json          { format, updatedAt, incidents: [...] }
+//   images/<id>.<ext>       capture originale
+//   images/<id>.thumb.jpg   miniature (360 px)
+//
+// Incident :
 // {
 //   id, createdAt, updatedAt, source: 'manuel' | 'import',
 //   date: 'AAAA-MM-JJ', time: 'HH:MM' | '',
 //   context, category, impact: 'faible'|'modere'|'eleve'|'critique', impactNotes,
-//   facts, quotes: [string], interpretation,
-//   witnesses: [string], tags: [string], evidenceNote,
-//   attachments: [attachmentId]
+//   facts, quotes: [string], interpretation, witnesses: [string], tags: [string], evidenceNote,
+//   attachments: [{ id, path, thumbPath, sha, thumbSha, name, type, size, width, height, addedAt, caption }]
 // }
-// Pièce jointe (méta en clair) : { id, incidentId, name, type, size, width, height, addedAt, caption }
-
-import * as db from './db.js';
-import { deriveKey, encryptJSON, decryptJSON, encryptBytes, decryptBytes, randomBytes, toBase64, fromBase64, uid } from './crypto.js';
 
 export const CATEGORIES = [
-  'Propos dévalorisants',
-  'Humiliation publique',
-  'Pression / surcharge',
-  'Instructions contradictoires',
-  'Mise à l\'écart',
-  'Rétention d\'information',
-  'Menace / intimidation',
-  'Discrimination',
-  'Congés / horaires',
-  'Autre'
+  'Propos dévalorisants', 'Humiliation publique', 'Pression / surcharge', 'Instructions contradictoires',
+  'Mise à l\'écart', 'Rétention d\'information', 'Menace / intimidation', 'Discrimination', 'Congés / horaires', 'Autre'
 ];
-
 export const IMPACTS = [
-  { value: 'faible', label: 'Faible' },
-  { value: 'modere', label: 'Modéré' },
-  { value: 'eleve', label: 'Élevé' },
-  { value: 'critique', label: 'Critique' }
+  { value: 'faible', label: 'Faible' }, { value: 'modere', label: 'Modéré' }, { value: 'eleve', label: 'Élevé' }, { value: 'critique', label: 'Critique' }
 ];
 
-const BACKUP_FORMAT = 'carnet-incidents/backup/1';
-const CHECK_PLAINTEXT = 'carnet-incidents-ok';
+const DATA_FORMAT = 'carnet-incidents/data/1';
+const DATA_FILE = 'incidents.json';
+const CFG_KEY = 'carnet.config';
+const CACHE_KEY = 'carnet.cache';
 
-let key = null;          // CryptoKey AES-GCM, en mémoire uniquement
-let vaultMeta = null;    // { salt, check, createdAt, iterations }
-let incidents = new Map();   // id -> incident en clair
-let attachMeta = new Map();  // id -> méta en clair
-const thumbURLs = new Map(); // id -> object URL (cache)
+let config = null;          // { owner, repo, branch, token }
+let incidents = new Map();
+let dataSha = null;         // sha git de incidents.json (nécessaire pour écrire)
+const blobCache = new Map(); // path -> object URL
 const listeners = new Set();
 
 function emit(type, payload) { listeners.forEach(fn => { try { fn(type, payload); } catch (e) { console.error(e); } }); }
 export function subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); }
 
-// ---------- état du coffre ----------
-
-export async function status() {
-  if (key) return 'unlocked';
-  const meta = await db.get('meta', 'vault');
-  vaultMeta = meta || null;
-  return meta ? 'locked' : 'uninitialized';
+export function uid() {
+  const b = new Uint8Array(8); crypto.getRandomValues(b);
+  return Date.now().toString(36) + '-' + Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
 }
 
-export async function setup(passphrase) {
-  if (await db.get('meta', 'vault')) throw new Error('Un coffre existe déjà.');
-  const salt = randomBytes(16);
-  const k = await deriveKey(passphrase, salt);
-  const check = await encryptJSON(k, { v: CHECK_PLAINTEXT });
-  vaultMeta = { id: 'vault', salt, check, createdAt: new Date().toISOString(), iterations: 310000 };
-  await db.put('meta', vaultMeta);
-  key = k;
-  incidents = new Map();
-  attachMeta = new Map();
-  db.requestPersistence();
-  emit('unlocked');
+// ---------- configuration ----------
+
+export function getConfig() {
+  if (config) return config;
+  try { config = JSON.parse(localStorage.getItem(CFG_KEY)); } catch (_) { config = null; }
+  return config;
+}
+export function isConnected() { return !!(config && config.token); }
+
+export function parseRepo(text) {
+  const m = String(text || '').trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '').match(/^([\w.-]+)\/([\w.-]+)\/?$/);
+  if (!m) throw new Error('Dépôt attendu sous la forme utilisateur/nom.');
+  return { owner: m[1], repo: m[2] };
 }
 
-export async function unlock(passphrase) {
-  const meta = await db.get('meta', 'vault');
-  if (!meta) throw new Error('Aucun coffre.');
-  const k = await deriveKey(passphrase, meta.salt);
-  try {
-    const c = await decryptJSON(k, meta.check);
-    if (c.v !== CHECK_PLAINTEXT) throw new Error();
-  } catch (_) {
-    throw new Error('Phrase secrète incorrecte.');
+export async function connect({ repo, token, branch = 'main' }) {
+  const { owner, repo: name } = parseRepo(repo);
+  const cfg = { owner, repo: name, branch, token: String(token || '').trim() };
+  if (!cfg.token) throw new Error('Token manquant.');
+  const r = await fetch(`${apiBase(cfg)}`, { headers: headers(cfg) });
+  if (r.status === 401) throw new Error('Token refusé (401). Vérifiez qu\'il est bien copié et non expiré.');
+  if (r.status === 404) throw new Error(`Dépôt ${owner}/${name} introuvable, ou token sans accès à ce dépôt.`);
+  if (!r.ok) throw new Error(`GitHub a répondu ${r.status}.`);
+  const info = await r.json();
+  if (info.private === false) throw new Error('Ce dépôt est PUBLIC : refusé. Les fiches doivent aller dans un dépôt privé.');
+  if (!info.permissions || !info.permissions.push) throw new Error('Le token ne permet pas d\'écrire dans ce dépôt (permission Contents : Read and write requise).');
+  cfg.branch = branch || info.default_branch || 'main';
+  config = cfg;
+  localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
+  await load();
+  emit('connected');
+}
+
+export function disconnect() {
+  config = null; incidents = new Map(); dataSha = null;
+  localStorage.removeItem(CFG_KEY); localStorage.removeItem(CACHE_KEY);
+  for (const u of blobCache.values()) URL.revokeObjectURL(u);
+  blobCache.clear();
+  emit('disconnected');
+}
+
+// ---------- API GitHub ----------
+
+function apiBase(cfg = config) { return `https://api.github.com/repos/${cfg.owner}/${cfg.repo}`; }
+function headers(cfg = config, extra = {}) {
+  return { Authorization: `Bearer ${cfg.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', ...extra };
+}
+function assertCfg() { if (!config || !config.token) throw new Error('Non connecté au dépôt.'); }
+
+async function apiJSON(method, path, body) {
+  assertCfg();
+  const r = await fetch(`${apiBase()}/contents/${encodePath(path)}${method === 'GET' ? `?ref=${encodeURIComponent(config.branch)}&t=${Date.now()}` : ''}`, {
+    method, headers: headers(config, body ? { 'Content-Type': 'application/json' } : {}), body: body ? JSON.stringify({ branch: config.branch, ...body }) : undefined
+  });
+  if (r.status === 404 && method === 'GET') return null;
+  if (!r.ok) {
+    let msg = `GitHub ${r.status}`;
+    try { const j = await r.json(); if (j.message) msg += ' : ' + j.message; } catch (_) {}
+    const e = new Error(msg); e.status = r.status; throw e;
   }
-  key = k;
-  vaultMeta = meta;
-  await loadAll();
-  db.requestPersistence();
-  emit('unlocked');
+  return r.json();
+}
+function encodePath(p) { return p.split('/').map(encodeURIComponent).join('/'); }
+
+function b64encode(bytes) { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(s); }
+function utf8ToB64(str) { return b64encode(new TextEncoder().encode(str)); }
+function b64ToUtf8(b64) { const s = atob(b64.replace(/\n/g, '')); const b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i); return new TextDecoder().decode(b); }
+
+// ---------- chargement / écriture de incidents.json ----------
+
+export function cachedIncidents() {
+  try { const c = JSON.parse(localStorage.getItem(CACHE_KEY)); return c && Array.isArray(c.incidents) ? c.incidents : []; } catch (_) { return []; }
 }
 
-export function lock() {
-  key = null;
-  incidents = new Map();
-  attachMeta = new Map();
-  for (const url of thumbURLs.values()) URL.revokeObjectURL(url);
-  thumbURLs.clear();
-  emit('locked');
+export async function load() {
+  assertCfg();
+  const file = await apiJSON('GET', DATA_FILE);
+  let list = [];
+  if (file) {
+    dataSha = file.sha;
+    const text = file.content ? b64ToUtf8(file.content) : await (await fetch(file.download_url, { headers: headers() })).text();
+    try { const parsed = JSON.parse(text); list = Array.isArray(parsed) ? parsed : (parsed.incidents || []); }
+    catch (e) { throw new Error('incidents.json est illisible (JSON invalide). Corrigez-le dans le dépôt.'); }
+  } else { dataSha = null; }
+  incidents = new Map(list.map(x => normalizeIncident(x)).map(i => [i.id, i]));
+  localStorage.setItem(CACHE_KEY, JSON.stringify({ at: new Date().toISOString(), incidents: Array.from(incidents.values()) }));
+  emit('changed');
+  return incidents.size;
 }
 
-export function isUnlocked() { return !!key; }
+function serialize() {
+  const list = Array.from(incidents.values()).sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')));
+  return JSON.stringify({ format: DATA_FORMAT, updatedAt: new Date().toISOString(), incidents: list }, null, 2) + '\n';
+}
 
-function assertKey() { if (!key) throw new Error('Coffre verrouillé.'); }
-
-async function loadAll() {
-  assertKey();
-  incidents = new Map();
-  attachMeta = new Map();
-  const recs = await db.getAll('incidents');
-  for (const r of recs) {
-    try { incidents.set(r.id, normalizeIncident(await decryptJSON(key, r.data))); }
-    catch (e) { console.error('Incident illisible', r.id, e); }
+// Écrit incidents.json. En cas de conflit (fichier modifié ailleurs), recharge et ré-applique la mutation.
+async function commitData(message, mutate) {
+  assertCfg();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    mutate();
+    try {
+      const res = await apiJSON('PUT', DATA_FILE, { message, content: utf8ToB64(serialize()), ...(dataSha ? { sha: dataSha } : {}) });
+      dataSha = res.content.sha;
+      localStorage.setItem(CACHE_KEY, JSON.stringify({ at: new Date().toISOString(), incidents: Array.from(incidents.values()) }));
+      return;
+    } catch (e) {
+      if ((e.status === 409 || e.status === 422) && attempt < 2) { await load(); continue; }
+      throw e;
+    }
   }
-  const atts = await db.getAll('attachments');
-  for (const a of atts) {
-    try { attachMeta.set(a.id, await decryptJSON(key, a.meta)); }
-    catch (e) { console.error('Pièce jointe illisible', a.id, e); }
-  }
-}
-
-export async function changePassphrase(oldPass, newPass) {
-  assertKey();
-  const meta = await db.get('meta', 'vault');
-  const kOld = await deriveKey(oldPass, meta.salt);
-  try { await decryptJSON(kOld, meta.check); } catch (_) { throw new Error('Ancienne phrase incorrecte.'); }
-  const salt = randomBytes(16);
-  const kNew = await deriveKey(newPass, salt);
-  // Re-chiffrement de tout
-  const incRecs = [];
-  for (const inc of incidents.values()) incRecs.push({ id: inc.id, data: await encryptJSON(kNew, inc), updatedAt: inc.updatedAt });
-  const attRecs = [];
-  for (const a of await db.getAll('attachments')) {
-    const m = await decryptJSON(key, a.meta);
-    const blob = await decryptBytes(key, a.blob);
-    const thumb = a.thumb ? await decryptBytes(key, a.thumb) : null;
-    attRecs.push({ id: a.id, incidentId: a.incidentId, meta: await encryptJSON(kNew, m), blob: await encryptBytes(kNew, blob), thumb: thumb ? await encryptBytes(kNew, thumb) : null });
-  }
-  const check = await encryptJSON(kNew, { v: CHECK_PLAINTEXT });
-  await db.putMany('incidents', incRecs);
-  await db.putMany('attachments', attRecs);
-  vaultMeta = { ...meta, salt, check };
-  await db.put('meta', vaultMeta);
-  key = kNew;
-}
-
-export async function wipeEverything() {
-  lock();
-  await db.clearAll();
-  vaultMeta = null;
-  emit('wiped');
 }
 
 // ---------- incidents ----------
@@ -154,7 +159,6 @@ export async function wipeEverything() {
 export function normalizeIncident(x) {
   const arr = v => Array.isArray(v) ? v.map(s => String(s).trim()).filter(Boolean) : (typeof v === 'string' && v.trim() ? v.split(/\n|;|,/).map(s => s.trim()).filter(Boolean) : []);
   const str = v => (v == null ? '' : String(v)).trim();
-  const impact = ['faible', 'modere', 'eleve', 'critique'].includes(x.impact) ? x.impact : 'modere';
   return {
     id: x.id || uid(),
     createdAt: x.createdAt || new Date().toISOString(),
@@ -163,8 +167,8 @@ export function normalizeIncident(x) {
     date: /^\d{4}-\d{2}-\d{2}$/.test(str(x.date)) ? str(x.date) : new Date().toISOString().slice(0, 10),
     time: /^\d{2}:\d{2}$/.test(str(x.time)) ? str(x.time) : '',
     context: str(x.context),
-    category: CATEGORIES.includes(x.category) ? x.category : (str(x.category) ? str(x.category) : 'Autre'),
-    impact,
+    category: str(x.category) || 'Autre',
+    impact: ['faible', 'modere', 'eleve', 'critique'].includes(x.impact) ? x.impact : 'modere',
     impactNotes: str(x.impactNotes),
     facts: str(x.facts),
     quotes: arr(x.quotes),
@@ -172,211 +176,123 @@ export function normalizeIncident(x) {
     witnesses: arr(x.witnesses),
     tags: arr(x.tags),
     evidenceNote: str(x.evidenceNote),
-    attachments: Array.isArray(x.attachments) ? x.attachments.filter(Boolean) : []
+    attachments: Array.isArray(x.attachments) ? x.attachments.filter(a => a && typeof a === 'object' && a.path) : []
   };
 }
 
 export function listIncidents() {
   return Array.from(incidents.values()).sort((a, b) => (b.date + (b.time || '00:00')).localeCompare(a.date + (a.time || '00:00')) || b.createdAt.localeCompare(a.createdAt));
 }
-
 export function getIncident(id) { return incidents.get(id) || null; }
 
 export async function saveIncident(data) {
-  assertKey();
   const prev = data.id ? incidents.get(data.id) : null;
-  const inc = normalizeIncident({ ...(prev || {}), ...data, updatedAt: new Date().toISOString() });
+  const inc = normalizeIncident({ ...(prev || {}), ...data, attachments: prev ? prev.attachments : (data.attachments || []), updatedAt: new Date().toISOString() });
   if (prev) inc.createdAt = prev.createdAt;
-  await db.put('incidents', { id: inc.id, data: await encryptJSON(key, inc), updatedAt: inc.updatedAt });
-  incidents.set(inc.id, inc);
+  await commitData(`${prev ? 'Modifie' : 'Ajoute'} fiche ${inc.date}`, () => { incidents.set(inc.id, inc); });
   emit('changed', inc.id);
   return inc;
 }
 
+export async function saveMany(list) {
+  const incs = list.map(x => normalizeIncident(x));
+  await commitData(`Importe ${incs.length} fiche(s)`, () => { incs.forEach(i => incidents.set(i.id, i)); });
+  emit('changed');
+  return incs;
+}
+
 export async function deleteIncident(id) {
-  assertKey();
   const inc = incidents.get(id);
   if (!inc) return;
-  for (const aid of inc.attachments) await removeAttachment(aid, true);
-  await db.del('incidents', id);
-  incidents.delete(id);
+  for (const a of inc.attachments) await deleteFile(a.path, a.sha).catch(e => console.warn('image non supprimée', a.path, e));
+  for (const a of inc.attachments) if (a.thumbPath) await deleteFile(a.thumbPath, a.thumbSha).catch(() => {});
+  await commitData(`Supprime fiche ${inc.date}`, () => { incidents.delete(id); });
   emit('changed', id);
 }
 
-// ---------- pièces jointes ----------
+// ---------- fichiers / pièces jointes ----------
+
+async function putFile(path, bytes, message) {
+  // Récupère le sha si le fichier existe déjà (écrasement), sinon création.
+  let sha;
+  try { const ex = await apiJSON('GET', path); if (ex) sha = ex.sha; } catch (_) {}
+  const res = await apiJSON('PUT', path, { message, content: b64encode(bytes), ...(sha ? { sha } : {}) });
+  return res.content.sha;
+}
+async function deleteFile(path, sha) {
+  if (!sha) { const ex = await apiJSON('GET', path); if (!ex) return; sha = ex.sha; }
+  await apiJSON('DELETE', path, { message: `Supprime ${path}`, sha });
+}
 
 async function makeThumb(blob, max = 360) {
   try {
     const bmp = await createImageBitmap(blob);
     const scale = Math.min(1, max / Math.max(bmp.width, bmp.height));
     const w = Math.max(1, Math.round(bmp.width * scale)), h = Math.max(1, Math.round(bmp.height * scale));
-    const canvas = document.createElement('canvas');
-    canvas.width = w; canvas.height = h;
+    const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
     canvas.getContext('2d').drawImage(bmp, 0, 0, w, h);
     const out = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.82));
     return { thumb: new Uint8Array(await out.arrayBuffer()), width: bmp.width, height: bmp.height };
-  } catch (_) {
-    return { thumb: null, width: 0, height: 0 };
-  }
+  } catch (_) { return { thumb: null, width: 0, height: 0 }; }
 }
 
 export async function addAttachment(incidentId, file, caption = '') {
-  assertKey();
   const inc = incidents.get(incidentId);
-  if (!inc) throw new Error('Incident introuvable.');
+  if (!inc) throw new Error('Fiche introuvable.');
   if (!/^image\//.test(file.type)) throw new Error('Seules les images sont acceptées.');
+  const id = uid();
+  const ext = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif', 'image/heic': 'heic' })[file.type] || (file.name.split('.').pop() || 'bin').toLowerCase();
   const bytes = new Uint8Array(await file.arrayBuffer());
   const { thumb, width, height } = await makeThumb(file);
-  const meta = { id: uid(), incidentId, name: file.name || 'capture', type: file.type, size: bytes.length, width, height, addedAt: new Date().toISOString(), caption };
-  const rec = {
-    id: meta.id, incidentId,
-    meta: await encryptJSON(key, meta),
-    blob: await encryptBytes(key, bytes),
-    thumb: thumb ? await encryptBytes(key, thumb) : null
-  };
-  await db.put('attachments', rec);
-  attachMeta.set(meta.id, meta);
-  // L'incident n'est considéré comme mis à jour qu'une fois la pièce réellement écrite.
-  await saveIncident({ ...inc, attachments: [...inc.attachments, meta.id] });
+  const path = `images/${inc.date}_${id}.${ext}`;
+  const sha = await putFile(path, bytes, `Ajoute capture ${file.name || path} (fiche ${inc.date})`);
+  let thumbPath = null, thumbSha = null;
+  if (thumb) { thumbPath = `images/${inc.date}_${id}.thumb.jpg`; thumbSha = await putFile(thumbPath, thumb, `Miniature ${path}`); }
+  const meta = { id, path, thumbPath, sha, thumbSha, name: file.name || path, type: file.type, size: bytes.length, width, height, addedAt: new Date().toISOString(), caption };
+  // La fiche ne référence l'image qu'une fois celle-ci réellement poussée.
+  await commitData(`Lie capture à la fiche ${inc.date}`, () => { const cur = incidents.get(incidentId); cur.attachments = [...cur.attachments.filter(a => a.id !== id), meta]; cur.updatedAt = new Date().toISOString(); });
+  emit('changed', incidentId);
   return meta;
 }
 
-export function getAttachmentMeta(id) { return attachMeta.get(id) || null; }
+export function listAttachments(incidentId) { const inc = incidents.get(incidentId); return inc ? inc.attachments : []; }
+export function getAttachmentMeta(incidentId, id) { return listAttachments(incidentId).find(a => a.id === id) || null; }
 
-export function listAttachments(incidentId) {
-  const inc = incidents.get(incidentId);
-  if (!inc) return [];
-  return inc.attachments.map(id => attachMeta.get(id)).filter(Boolean);
+export async function updateAttachmentCaption(incidentId, id, caption) {
+  await commitData(`Légende capture (fiche ${incidents.get(incidentId).date})`, () => { const a = getAttachmentMeta(incidentId, id); if (a) a.caption = caption; });
+  emit('changed', incidentId);
 }
 
-export async function updateAttachmentCaption(id, caption) {
-  assertKey();
-  const meta = attachMeta.get(id);
-  const rec = await db.get('attachments', id);
-  if (!meta || !rec) return;
-  const next = { ...meta, caption };
-  rec.meta = await encryptJSON(key, next);
-  await db.put('attachments', rec);
-  attachMeta.set(id, next);
-  emit('changed', meta.incidentId);
+export async function removeAttachment(incidentId, id) {
+  const a = getAttachmentMeta(incidentId, id);
+  if (!a) return;
+  await deleteFile(a.path, a.sha);
+  if (a.thumbPath) await deleteFile(a.thumbPath, a.thumbSha).catch(() => {});
+  for (const p of [a.path, a.thumbPath]) if (p && blobCache.has(p)) { URL.revokeObjectURL(blobCache.get(p)); blobCache.delete(p); }
+  await commitData(`Retire capture (fiche ${incidents.get(incidentId).date})`, () => { const cur = incidents.get(incidentId); cur.attachments = cur.attachments.filter(x => x.id !== id); });
+  emit('changed', incidentId);
 }
 
-export async function getAttachmentBlob(id) {
-  assertKey();
-  const rec = await db.get('attachments', id);
-  const meta = attachMeta.get(id);
-  if (!rec || !meta) throw new Error('Pièce jointe introuvable.');
-  const bytes = await decryptBytes(key, rec.blob);
-  return new Blob([bytes], { type: meta.type });
+// Télécharge un fichier du dépôt (contenu brut) → Blob
+export async function getFileBlob(path, type = 'application/octet-stream') {
+  assertCfg();
+  const r = await fetch(`${apiBase()}/contents/${encodePath(path)}?ref=${encodeURIComponent(config.branch)}`, { headers: headers(config, { Accept: 'application/vnd.github.raw+json' }) });
+  if (!r.ok) throw new Error(`Image introuvable (${r.status}) : ${path}`);
+  return new Blob([await r.arrayBuffer()], { type });
 }
-
-export async function getThumbURL(id) {
-  assertKey();
-  if (thumbURLs.has(id)) return thumbURLs.get(id);
-  const rec = await db.get('attachments', id);
-  const meta = attachMeta.get(id);
-  if (!rec || !meta) return null;
-  const bytes = rec.thumb ? await decryptBytes(key, rec.thumb) : await decryptBytes(key, rec.blob);
-  const url = URL.createObjectURL(new Blob([bytes], { type: rec.thumb ? 'image/jpeg' : meta.type }));
-  thumbURLs.set(id, url);
+export async function getFileURL(path, type) {
+  if (blobCache.has(path)) return blobCache.get(path);
+  const url = URL.createObjectURL(await getFileBlob(path, type));
+  blobCache.set(path, url);
   return url;
 }
+export async function getThumbURL(a) { return getFileURL(a.thumbPath || a.path, a.thumbPath ? 'image/jpeg' : a.type); }
+export async function getAttachmentBlob(a) { return getFileBlob(a.path, a.type); }
 
-export async function removeAttachment(id, skipIncidentUpdate = false) {
-  assertKey();
-  const meta = attachMeta.get(id);
-  await db.del('attachments', id);
-  attachMeta.delete(id);
-  if (thumbURLs.has(id)) { URL.revokeObjectURL(thumbURLs.get(id)); thumbURLs.delete(id); }
-  if (meta && !skipIncidentUpdate) {
-    const inc = incidents.get(meta.incidentId);
-    if (inc) await saveIncident({ ...inc, attachments: inc.attachments.filter(x => x !== id) });
-  }
+export function stats() {
+  let attachments = 0, attachBytes = 0;
+  for (const i of incidents.values()) for (const a of i.attachments) { attachments++; attachBytes += a.size || 0; }
+  return { incidents: incidents.size, attachments, attachBytes };
 }
 
-// ---------- préférences (non sensibles) ----------
-
-export async function getPref(id, fallback = null) {
-  const r = await db.get('prefs', id);
-  return r ? r.value : fallback;
-}
-export async function setPref(id, value) { await db.put('prefs', { id, value }); }
-
-export async function stats() {
-  const est = await db.storageEstimate();
-  let attachBytes = 0;
-  for (const m of attachMeta.values()) attachBytes += m.size || 0;
-  return { incidents: incidents.size, attachments: attachMeta.size, attachBytes, usage: est ? est.usage : null, quota: est ? est.quota : null };
-}
-
-// ---------- sauvegarde / restauration ----------
-// Fichier .carnet : JSON { format, createdAt, salt(b64), iterations, payload(b64) }
-// payload = chiffré avec la clé dérivée de la phrase secrète + salt du fichier.
-// Contenu déchiffré : { incidents: [...], attachments: [{ meta, blob(b64), thumb(b64) }] }
-
-export async function exportBackup() {
-  assertKey();
-  const atts = [];
-  for (const a of await db.getAll('attachments')) {
-    const meta = attachMeta.get(a.id);
-    if (!meta) continue;
-    atts.push({ meta, blob: toBase64(await decryptBytes(key, a.blob)), thumb: a.thumb ? toBase64(await decryptBytes(key, a.thumb)) : null });
-  }
-  const plain = { incidents: Array.from(incidents.values()), attachments: atts };
-  const payload = await encryptJSON(key, plain);
-  const file = { format: BACKUP_FORMAT, createdAt: new Date().toISOString(), salt: toBase64(vaultMeta.salt), iterations: vaultMeta.iterations || 310000, counts: { incidents: incidents.size, attachments: atts.length }, payload: toBase64(payload) };
-  await setPref('lastBackupAt', file.createdAt);
-  return new Blob([JSON.stringify(file)], { type: 'application/json' });
-}
-
-export async function readBackup(file, passphrase) {
-  const text = await file.text();
-  let parsed;
-  try { parsed = JSON.parse(text); } catch (_) { throw new Error('Fichier illisible (JSON invalide).'); }
-  if (parsed.format !== BACKUP_FORMAT) throw new Error('Format de sauvegarde non reconnu.');
-  const salt = fromBase64(parsed.salt);
-  const k = await deriveKey(passphrase, salt);
-  let plain;
-  try { plain = await decryptJSON(k, fromBase64(parsed.payload)); }
-  catch (_) { throw new Error('Phrase secrète incorrecte pour cette sauvegarde.'); }
-  return plain;
-}
-
-// mode : 'merge' (ajoute/écrase par id) ou 'replace' (vide le coffre d'abord)
-export async function restoreBackup(plain, mode = 'merge') {
-  assertKey();
-  if (mode === 'replace') {
-    await db.clearStore('incidents');
-    await db.clearStore('attachments');
-    incidents = new Map();
-    attachMeta = new Map();
-    for (const url of thumbURLs.values()) URL.revokeObjectURL(url);
-    thumbURLs.clear();
-  }
-  let nInc = 0, nAtt = 0;
-  const attRecs = [];
-  for (const a of plain.attachments || []) {
-    if (!a.meta || !a.meta.id || !a.blob) continue;
-    attRecs.push({ id: a.meta.id, incidentId: a.meta.incidentId, meta: await encryptJSON(key, a.meta), blob: await encryptBytes(key, fromBase64(a.blob)), thumb: a.thumb ? await encryptBytes(key, fromBase64(a.thumb)) : null });
-    attachMeta.set(a.meta.id, a.meta);
-    nAtt++;
-  }
-  if (attRecs.length) await db.putMany('attachments', attRecs);
-  const incRecs = [];
-  for (const raw of plain.incidents || []) {
-    const inc = normalizeIncident(raw);
-    inc.attachments = inc.attachments.filter(id => attachMeta.has(id));
-    incRecs.push({ id: inc.id, data: await encryptJSON(key, inc), updatedAt: inc.updatedAt });
-    incidents.set(inc.id, inc);
-    nInc++;
-  }
-  if (incRecs.length) await db.putMany('incidents', incRecs);
-  emit('changed');
-  return { incidents: nInc, attachments: nAtt };
-}
-
-// Export en clair (JSON) pour analyse / migration. À manipuler avec précaution.
-export function exportPlainJSON() {
-  assertKey();
-  return JSON.stringify({ format: 'carnet-incidents/plain/1', exportedAt: new Date().toISOString(), incidents: Array.from(incidents.values()), attachments: Array.from(attachMeta.values()) }, null, 2);
-}
+export function exportPlainJSON() { return serialize(); }

@@ -14,102 +14,63 @@ const impactLabel = v => (IMPACTS.find(i => i.value === v) || { label: v }).labe
 const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 const nowHM = () => { const d = new Date(); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
 const fmtBytes = n => n < 1024 ? n + ' o' : n < 1048576 ? (n / 1024).toFixed(0) + ' Ko' : (n / 1048576).toFixed(1) + ' Mo';
+const stamp = () => new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', 'h');
 
 function toast(msg, kind = '') {
-  const el = document.createElement('div');
-  el.className = 'toast ' + kind; el.textContent = msg;
-  $('#toasts').appendChild(el);
-  setTimeout(() => el.remove(), kind === 'err' ? 6000 : 3200);
+  const el = document.createElement('div'); el.className = 'toast ' + kind; el.textContent = msg;
+  $('#toasts').appendChild(el); setTimeout(() => el.remove(), kind === 'err' ? 7000 : 3200);
 }
-
 function confirmDlg(title, text, okLabel = 'Confirmer') {
   const d = $('#dlg-confirm');
   $('#confirm-title').textContent = title; $('#confirm-text').textContent = text; $('#confirm-ok').textContent = okLabel;
   return new Promise(res => { d.onclose = () => res(d.returnValue === 'ok'); d.showModal(); });
 }
-
 function download(blob, filename) {
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob); a.download = filename;
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 30000);
 }
 
-const stamp = () => new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', 'h');
+// ───────────────────────── Démarrage / connexion ─────────────────────────
 
-// ───────────────────────── Démarrage / coffre ─────────────────────────
-
-const supported = typeof indexedDB !== 'undefined' && window.crypto && crypto.subtle && typeof HTMLDialogElement !== 'undefined';
+const supported = typeof fetch !== 'undefined' && typeof HTMLDialogElement !== 'undefined' && typeof localStorage !== 'undefined';
 
 async function boot() {
-  $('#gate').hidden = false;
-  if (!supported) { $('#gate-unsupported').hidden = false; return; }
-  const st = await store.status();
-  if (st === 'uninitialized') $('#gate-setup').hidden = false;
-  else if (st === 'locked') { $('#gate-unlock').hidden = false; setTimeout(() => $('#form-unlock input[name=pass]').focus(), 50); }
+  if (!supported) { $('#gate').hidden = false; $('#gate-unsupported').hidden = false; return; }
+  populateSelects();
+  if (store.isConnected() || store.getConfig()) { enterApp(); }
+  else { showGate(); }
 }
-
+function showGate() { $('#app').hidden = true; $('#gate').hidden = false; $('#gate-connect').hidden = false; gateError(''); }
 function gateError(msg) { const e = $('#gate-error'); e.textContent = msg || ''; e.hidden = !msg; }
 
-$('#form-setup').addEventListener('submit', async ev => {
+$('#form-connect').addEventListener('submit', async ev => {
   ev.preventDefault();
-  const f = ev.target;
-  if (f.pass.value !== f.pass2.value) return gateError('Les deux phrases ne correspondent pas.');
-  if (f.pass.value.length < 8) return gateError('8 caractères minimum.');
-  gateError('');
-  f.querySelector('button').disabled = true;
-  try { await store.setup(f.pass.value); f.reset(); enterApp(); }
+  const f = ev.target, btn = f.querySelector('button[type=submit]');
+  btn.disabled = true; btn.textContent = 'Connexion…'; gateError('');
+  try { await store.connect({ repo: f.repo.value, token: f.token.value }); f.token.value = ''; enterApp(); }
   catch (e) { gateError(e.message); }
-  finally { f.querySelector('button').disabled = false; }
-});
-
-$('#form-unlock').addEventListener('submit', async ev => {
-  ev.preventDefault();
-  const f = ev.target; const btn = f.querySelector('button');
-  btn.disabled = true; gateError('');
-  try { await store.unlock(f.pass.value); f.reset(); enterApp(); }
-  catch (e) { gateError(e.message); }
-  finally { btn.disabled = false; }
-});
-
-$('#btn-gate-restore').addEventListener('click', () => {
-  gateError('Déverrouillez d\'abord ce carnet, puis Menu → Restaurer. Sur un appareil vierge, créez un carnet avec la phrase secrète de votre sauvegarde, puis restaurez-la.');
+  finally { btn.disabled = false; btn.textContent = 'Connecter'; }
 });
 
 async function enterApp() {
   $('#gate').hidden = true; $('#app').hidden = false;
-  populateSelects();
-  await loadPrefs();
+  render(); // affiche le cache local immédiatement
+  await refresh(false);
+}
+
+async function refresh(verbose = true) {
+  const banner = $('#sync-banner');
+  try {
+    const n = await store.load();
+    banner.hidden = true;
+    if (verbose) toast(`À jour : ${n} fiche(s) dans le dépôt.`, 'ok');
+  } catch (e) {
+    console.error(e);
+    $('#sync-banner-text').textContent = 'Dépôt inaccessible : ' + e.message + ' — affichage de la dernière copie locale, enregistrement impossible.';
+    banner.hidden = false;
+    if (/401|404|token/i.test(e.message)) { const cfg = store.getConfig(); if (cfg) $('#form-connect input[name=repo]').value = `${cfg.owner}/${cfg.repo}`; }
+  }
   render();
-  armAutoLock();
-  checkBackupReminder();
-}
-
-function lockApp() {
-  closePanel(true); closeLightbox();
-  $$('dialog[open]').forEach(d => d.close());
-  store.lock();
-  $('#app').hidden = true; $('#gate').hidden = false;
-  $('#gate-setup').hidden = true; $('#gate-unlock').hidden = false;
-  gateError('');
-  setTimeout(() => $('#form-unlock input[name=pass]').focus(), 50);
-}
-
-// Verrouillage automatique après inactivité
-let lockMinutes = 15, lockTimer = null, lastActivity = Date.now();
-function armAutoLock() {
-  clearTimeout(lockTimer);
-  if (!lockMinutes || !store.isUnlocked()) return;
-  lockTimer = setTimeout(() => { if (store.isUnlocked()) { lockApp(); toast('Verrouillé après inactivité.'); } }, lockMinutes * 60000);
-}
-['pointerdown', 'keydown', 'touchstart', 'scroll'].forEach(evn => document.addEventListener(evn, () => { lastActivity = Date.now(); if (store.isUnlocked()) armAutoLock(); }, { passive: true }));
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && store.isUnlocked() && lockMinutes && Date.now() - lastActivity > lockMinutes * 60000) lockApp();
-});
-
-async function loadPrefs() {
-  lockMinutes = Number(await store.getPref('lockMinutes', 15));
-  $('#set-lock').value = String(lockMinutes);
 }
 
 function populateSelects() {
@@ -125,6 +86,13 @@ function populateSelects() {
 
 const filters = { q: '', category: '', impact: '', from: '', to: '', evidence: false };
 let visibleList = [];
+
+function currentList() {
+  const l = store.listIncidents();
+  if (l.length) return l;
+  // Avant le premier chargement réussi : cache local (lecture seule)
+  return store.cachedIncidents().map(store.normalizeIncident).sort((a, b) => (b.date + (b.time || '')).localeCompare(a.date + (a.time || '')));
+}
 
 function matches(inc) {
   if (filters.category && inc.category !== filters.category) return false;
@@ -145,11 +113,11 @@ function highlight(text) {
   if (!filters.q) return s;
   const terms = fold(filters.q).split(/\s+/).filter(t => t.length > 1);
   if (!terms.length) return s;
-  // Surlignage approximatif insensible aux accents : on travaille sur la version pliée pour trouver les positions.
   const folded = fold(text);
+  if (folded.length !== text.length) return s;
   const ranges = [];
   for (const t of terms) { let i = 0; while ((i = folded.indexOf(t, i)) >= 0) { ranges.push([i, i + t.length]); i += t.length; } }
-  if (!ranges.length || folded.length !== text.length) return s; // si la normalisation a changé la longueur, on évite tout décalage
+  if (!ranges.length) return s;
   ranges.sort((a, b) => a[0] - b[0]);
   let out = '', pos = 0;
   for (const [a, b] of ranges) { if (a < pos) continue; out += esc(text.slice(pos, a)) + '<mark>' + esc(text.slice(a, b)) + '</mark>'; pos = b; }
@@ -157,7 +125,7 @@ function highlight(text) {
 }
 
 function render() {
-  const all = store.listIncidents();
+  const all = currentList();
   visibleList = all.filter(matches);
   const tl = $('#timeline');
   const active = filters.q || filters.category || filters.impact || filters.from || filters.to || filters.evidence;
@@ -171,7 +139,7 @@ function render() {
     const monthKey = `${y}-${m}`;
     if (monthKey !== lastMonth) { html += `<div class="month">${MONTHS[m - 1]} ${y}</div>`; lastMonth = monthKey; }
     const dow = DOWS[new Date(y, m - 1, d).getDay()];
-    const atts = store.listAttachments(inc.id);
+    const atts = inc.attachments;
     html += `
 <article class="card" data-id="${inc.id}" tabindex="0">
   <div class="when"><span class="day">${d}</span><span class="dow">${dow}</span>${inc.time ? `<span class="time">${esc(inc.time)}</span>` : ''}</div>
@@ -190,31 +158,27 @@ function render() {
 $('#timeline').addEventListener('click', ev => {
   const thumb = ev.target.closest('.thumb');
   if (thumb) { ev.stopPropagation(); openLightbox(thumb.closest('.ev').dataset.id, Number(thumb.dataset.index)); return; }
-  if (ev.target.closest('.ev')) return; // le dropdown gère lui-même son ouverture
+  if (ev.target.closest('.ev')) return;
   const card = ev.target.closest('.card');
   if (card) openEdit(card.dataset.id);
 });
-$('#timeline').addEventListener('keydown', ev => {
-  if (ev.key === 'Enter' && ev.target.classList.contains('card')) openEdit(ev.target.dataset.id);
-});
+$('#timeline').addEventListener('keydown', ev => { if (ev.key === 'Enter' && ev.target.classList.contains('card')) openEdit(ev.target.dataset.id); });
 $('#timeline').addEventListener('toggle', ev => {
   const det = ev.target;
   if (det.tagName !== 'DETAILS' || !det.open) return;
   const grid = $('.ev-grid', det);
-  if (grid.childElementCount) return;
-  loadThumbs(grid, det.dataset.id);
+  if (!grid.childElementCount) loadThumbs(grid, det.dataset.id);
 }, true);
 
 async function loadThumbs(grid, incidentId) {
   const atts = store.listAttachments(incidentId);
   grid.innerHTML = atts.map((a, i) => `<div class="thumb" data-index="${i}" title="${esc(a.name)}"><img alt="${esc(a.name)}">${a.caption ? `<span class="cap">${esc(a.caption)}</span>` : ''}</div>`).join('');
   for (let i = 0; i < atts.length; i++) {
-    try { const url = await store.getThumbURL(atts[i].id); const img = grid.children[i] && grid.children[i].querySelector('img'); if (img && url) img.src = url; }
+    try { const url = await store.getThumbURL(atts[i]); const img = grid.children[i] && grid.children[i].querySelector('img'); if (img && url) img.src = url; }
     catch (e) { console.error(e); }
   }
 }
 
-// filtres
 $('#search').addEventListener('input', ev => { filters.q = ev.target.value.trim(); render(); });
 $('#f-category').addEventListener('change', ev => { filters.category = ev.target.value; render(); });
 $('#f-impact').addEventListener('change', ev => { filters.impact = ev.target.value; render(); });
@@ -226,15 +190,12 @@ $('#btn-clear-filters').addEventListener('click', () => {
   $('#search').value = ''; $('#f-category').value = ''; $('#f-impact').value = ''; $('#f-from').value = ''; $('#f-to').value = ''; $('#f-evidence').checked = false;
   render();
 });
-
-store.subscribe(type => { if (type === 'changed' && store.isUnlocked()) render(); });
+store.subscribe(type => { if (type === 'changed') render(); });
 
 // ───────────────────────── Fiche (panneau) ─────────────────────────
 
 const panel = $('#panel'), form = $('#form-incident');
-let currentId = null;      // id de la fiche ouverte (null = nouvelle)
-let pendingFiles = [];     // images en attente pour une nouvelle fiche (non enregistrées tant que la fiche n'existe pas)
-let dirty = false;
+let currentId = null, pendingFiles = [], dirty = false;
 
 function setSaveState(text, cls = '') { const el = $('#save-state'); el.textContent = text; el.className = 'save-state ' + cls; }
 
@@ -248,27 +209,25 @@ function openNew(prefill = {}) {
   $('#panel-title').textContent = 'Nouvel incident';
   $('#btn-delete').hidden = true;
   setSaveState('Non enregistré');
-  renderAttachments();
-  showPanel();
+  renderAttachments(); showPanel();
   setTimeout(() => form.context.focus(), 60);
 }
 
 function openEdit(id) {
   const inc = store.getIncident(id);
-  if (!inc) return;
+  if (!inc) { toast('Fiche en lecture seule tant que le dépôt n\'est pas joignable.', 'err'); return; }
   currentId = id; pendingFiles = []; dirty = false;
   form.reset();
   form.date.value = inc.date; form.time.value = inc.time; form.context.value = inc.context;
-  form.category.value = CATEGORIES.includes(inc.category) ? inc.category : 'Autre';
-  if (!CATEGORIES.includes(inc.category)) { const o = document.createElement('option'); o.value = inc.category; o.textContent = inc.category; form.category.appendChild(o); form.category.value = inc.category; }
+  if (!CATEGORIES.includes(inc.category)) { const o = document.createElement('option'); o.value = inc.category; o.textContent = inc.category; form.category.appendChild(o); }
+  form.category.value = inc.category;
   form.impact.value = inc.impact; form.facts.value = inc.facts; form.quotes.value = inc.quotes.join('\n');
   form.interpretation.value = inc.interpretation; form.witnesses.value = inc.witnesses.join(', '); form.tags.value = inc.tags.join(', ');
   form.impactNotes.value = inc.impactNotes; form.evidenceNote.value = inc.evidenceNote;
   $('#panel-title').textContent = 'Fiche du ' + inc.date.split('-').reverse().join('/');
   $('#btn-delete').hidden = false;
-  setSaveState('Enregistré');
-  renderAttachments();
-  showPanel();
+  setSaveState('Enregistré dans le dépôt');
+  renderAttachments(); showPanel();
 }
 
 function showPanel() { panel.hidden = false; $('#scrim').hidden = false; document.body.style.overflow = 'hidden'; }
@@ -281,7 +240,6 @@ async function closePanel(force = false) {
   panel.hidden = true; $('#scrim').hidden = true; document.body.style.overflow = '';
   currentId = null; pendingFiles = []; dirty = false;
 }
-
 form.addEventListener('input', ev => { if (ev.target.closest('.attachments')) return; dirty = true; setSaveState('Modifications non enregistrées'); });
 $('#btn-panel-close').addEventListener('click', () => closePanel());
 $('#scrim').addEventListener('click', () => closePanel());
@@ -299,36 +257,35 @@ function readForm() {
 
 form.addEventListener('submit', async ev => {
   ev.preventDefault();
-  const btn = $('#btn-save'); btn.disabled = true;
+  const btn = $('#btn-save'); btn.disabled = true; setSaveState('Envoi vers le dépôt…');
   try {
     const inc = await store.saveIncident(readForm());
     currentId = inc.id; dirty = false;
     $('#panel-title').textContent = 'Fiche du ' + inc.date.split('-').reverse().join('/');
     $('#btn-delete').hidden = false;
-    setSaveState('Enregistré à ' + nowHM(), 'ok');
+    setSaveState('Enregistré dans le dépôt à ' + nowHM(), 'ok');
     if (pendingFiles.length) { const files = pendingFiles.map(f => f.file); pendingFiles.forEach(f => URL.revokeObjectURL(f.previewURL)); pendingFiles = []; await attachFiles(files); }
     else renderAttachments();
   } catch (e) {
-    console.error(e); setSaveState('Échec : ' + e.message, 'err'); toast('Enregistrement impossible : ' + e.message, 'err');
+    console.error(e); setSaveState('NON enregistré : ' + e.message, 'err'); toast('Enregistrement impossible : ' + e.message, 'err');
   } finally { btn.disabled = false; }
 });
 
 $('#btn-delete').addEventListener('click', async () => {
   if (!currentId) return;
   const n = store.listAttachments(currentId).length;
-  if (!await confirmDlg('Supprimer cette fiche ?', n ? `La fiche et ses ${n} capture(s) seront supprimées définitivement.` : 'La fiche sera supprimée définitivement.', 'Supprimer')) return;
+  if (!await confirmDlg('Supprimer cette fiche ?', n ? `La fiche et ses ${n} capture(s) seront supprimées du dépôt (l'historique git les conserve).` : 'La fiche sera supprimée du dépôt (l\'historique git la conserve).', 'Supprimer')) return;
   try { await store.deleteIncident(currentId); closePanel(true); toast('Fiche supprimée.'); }
   catch (e) { toast('Suppression impossible : ' + e.message, 'err'); }
 });
 
-// Pièces jointes
 async function renderAttachments() {
   const list = $('#attach-list'), hint = $('#attach-hint');
   const atts = currentId ? store.listAttachments(currentId) : [];
   $('#attach-count').textContent = atts.length ? `(${atts.length})` : '';
-  hint.hidden = !!currentId && !pendingFiles.length;
-  hint.textContent = currentId ? '' : (pendingFiles.length ? `${pendingFiles.length} capture(s) en attente : elles seront enregistrées avec la fiche.` : 'Les captures ajoutées maintenant seront enregistrées avec la fiche. Vous pouvez aussi coller une image (Ctrl/Cmd+V) ou la glisser ici.');
-  if (currentId && pendingFiles.length) { hint.hidden = false; hint.textContent = `${pendingFiles.length} capture(s) en attente.`; }
+  if (!currentId) hint.textContent = pendingFiles.length ? `${pendingFiles.length} capture(s) en attente : elles seront poussées dans le dépôt avec la fiche.` : 'Ajoutez des captures maintenant (elles partent avec la fiche), collez une image (Ctrl/Cmd+V) ou glissez-la ici.';
+  else hint.textContent = pendingFiles.length ? `${pendingFiles.length} capture(s) en attente.` : '';
+  hint.hidden = !hint.textContent;
   list.innerHTML = atts.map((a, i) => `
 <div class="att" data-id="${a.id}">
   <div class="thumb" data-index="${i}"><img alt="${esc(a.name)}"></div>
@@ -337,15 +294,15 @@ async function renderAttachments() {
 </div>`).join('') + pendingFiles.map(f => `
 <div class="att pending"><div class="thumb"><img alt="" src="${f.previewURL}"></div><div class="att-foot"><span>En attente · ${fmtBytes(f.file.size)}</span><button type="button" data-unpend="${f.key}">Retirer</button></div></div>`).join('');
   for (let i = 0; i < atts.length; i++) {
-    try { const url = await store.getThumbURL(atts[i].id); const img = list.children[i] && list.children[i].querySelector('img'); if (img && url) img.src = url; } catch (e) { console.error(e); }
+    try { const url = await store.getThumbURL(atts[i]); const img = list.children[i] && list.children[i].querySelector('img'); if (img && url) img.src = url; } catch (e) { console.error(e); }
   }
 }
 
 $('#attach-list').addEventListener('click', async ev => {
   const rm = ev.target.closest('[data-remove]');
   if (rm) {
-    if (!await confirmDlg('Retirer cette capture ?', 'Elle sera supprimée définitivement de la fiche.', 'Retirer')) return;
-    try { await store.removeAttachment(rm.dataset.remove); renderAttachments(); toast('Capture retirée.'); }
+    if (!await confirmDlg('Retirer cette capture ?', 'Elle sera supprimée du dépôt.', 'Retirer')) return;
+    try { await store.removeAttachment(currentId, rm.dataset.remove); renderAttachments(); toast('Capture retirée.'); }
     catch (e) { toast('Impossible de retirer : ' + e.message, 'err'); }
     return;
   }
@@ -355,12 +312,10 @@ $('#attach-list').addEventListener('click', async ev => {
   if (th && currentId && th.dataset.index != null) openLightbox(currentId, Number(th.dataset.index));
 });
 $('#attach-list').addEventListener('change', async ev => {
-  const inp = ev.target.closest('[data-caption]');
-  if (!inp) return;
-  try { await store.updateAttachmentCaption(inp.dataset.caption, inp.value.trim()); setSaveState('Légende enregistrée', 'ok'); }
+  const inp = ev.target.closest('[data-caption]'); if (!inp) return;
+  try { await store.updateAttachmentCaption(currentId, inp.dataset.caption, inp.value.trim()); setSaveState('Légende enregistrée', 'ok'); }
   catch (e) { toast('Légende non enregistrée : ' + e.message, 'err'); }
 });
-// Éviter que la saisie d'une légende marque la fiche comme modifiée
 $('#attach-list').addEventListener('input', ev => ev.stopPropagation());
 
 async function attachFiles(files) {
@@ -368,27 +323,23 @@ async function attachFiles(files) {
   if (!imgs.length) { toast('Aucune image reconnue.', 'err'); return; }
   if (!currentId) {
     for (const file of imgs) pendingFiles.push({ key: Math.random().toString(36).slice(2), file, previewURL: URL.createObjectURL(file) });
-    renderAttachments();
-    return;
+    renderAttachments(); return;
   }
   const prog = $('#attach-progress'); prog.hidden = false;
   let ok = 0, failed = [];
   for (let i = 0; i < imgs.length; i++) {
-    prog.textContent = `Enregistrement de la capture ${i + 1} / ${imgs.length}…`;
+    prog.textContent = `Envoi de la capture ${i + 1} / ${imgs.length} vers le dépôt…`;
     try { await store.addAttachment(currentId, imgs[i]); ok++; }
-    catch (e) { console.error(e); failed.push(imgs[i].name || 'image'); }
+    catch (e) { console.error(e); failed.push((imgs[i].name || 'image') + ' (' + e.message + ')'); }
   }
-  prog.hidden = true;
-  renderAttachments();
-  if (ok) toast(`${ok} capture(s) enregistrée(s).`, 'ok');
-  if (failed.length) toast(`Non enregistrée(s) : ${failed.join(', ')}`, 'err');
+  prog.hidden = true; renderAttachments();
+  if (ok) toast(`${ok} capture(s) enregistrée(s) dans le dépôt.`, 'ok');
+  if (failed.length) toast(`NON enregistrée(s) : ${failed.join(', ')}`, 'err');
 }
-
 $('#file-input').addEventListener('change', ev => { attachFiles(ev.target.files); ev.target.value = ''; });
 
-// Coller une image : dans le panneau → jointe à la fiche ; ailleurs → nouvelle fiche avec la capture en attente.
 document.addEventListener('paste', ev => {
-  if (!store.isUnlocked()) return;
+  if (!store.isConnected()) return;
   const items = Array.from(ev.clipboardData ? ev.clipboardData.items : []).filter(it => it.kind === 'file' && /^image\//.test(it.type));
   if (!items.length) return;
   if ($$('dialog[open]').length || !$('#lightbox').hidden) return;
@@ -397,7 +348,6 @@ document.addEventListener('paste', ev => {
   if (panel.hidden) openNew();
   attachFiles(files);
 });
-// Glisser-déposer dans le panneau
 ['dragenter', 'dragover'].forEach(evn => panel.addEventListener(evn, ev => { ev.preventDefault(); panel.classList.add('drop'); }));
 ['dragleave', 'drop'].forEach(evn => panel.addEventListener(evn, ev => { ev.preventDefault(); panel.classList.remove('drop'); }));
 panel.addEventListener('drop', ev => { if (ev.dataTransfer && ev.dataTransfer.files.length) attachFiles(ev.dataTransfer.files); });
@@ -422,8 +372,8 @@ async function showLb() {
   $('#lb-prev').disabled = lbIndex === 0; $('#lb-next').disabled = lbIndex === lbList.length - 1;
   if (lbURL) { URL.revokeObjectURL(lbURL); lbURL = null; }
   lbImg.removeAttribute('src');
-  try { const thumb = await store.getThumbURL(a.id); if (thumb) lbImg.src = thumb; } catch (_) {}
-  try { lbURL = URL.createObjectURL(await store.getAttachmentBlob(a.id)); lbImg.src = lbURL; }
+  try { const t = await store.getThumbURL(a); if (t) lbImg.src = t; } catch (_) {}
+  try { lbURL = URL.createObjectURL(await store.getAttachmentBlob(a)); lbImg.src = lbURL; }
   catch (e) { toast('Impossible de lire la capture : ' + e.message, 'err'); }
 }
 function closeLightbox() {
@@ -435,15 +385,11 @@ function closeLightbox() {
 $('#lb-close').addEventListener('click', closeLightbox);
 $('#lb-prev').addEventListener('click', () => { if (lbIndex > 0) { lbIndex--; showLb(); } });
 $('#lb-next').addEventListener('click', () => { if (lbIndex < lbList.length - 1) { lbIndex++; showLb(); } });
-$('#lb-download').addEventListener('click', async () => {
-  const a = lbList[lbIndex]; if (!a) return;
-  try { download(await store.getAttachmentBlob(a.id), a.name); } catch (e) { toast(e.message, 'err'); }
-});
+$('#lb-download').addEventListener('click', async () => { const a = lbList[lbIndex]; if (!a) return; try { download(await store.getAttachmentBlob(a), a.name); } catch (e) { toast(e.message, 'err'); } });
 lbImg.addEventListener('click', ev => {
   const zoomed = lbStage.classList.toggle('zoomed');
   if (zoomed) {
-    // centre le zoom sur le point cliqué
-    const rx = (ev.clientX - lbStage.getBoundingClientRect().left) / lbStage.clientWidth, ry = (ev.clientY - lbStage.getBoundingClientRect().top) / lbStage.clientHeight;
+    const r = lbStage.getBoundingClientRect(); const rx = (ev.clientX - r.left) / lbStage.clientWidth, ry = (ev.clientY - r.top) / lbStage.clientHeight;
     requestAnimationFrame(() => { lbStage.scrollLeft = (lbImg.naturalWidth - lbStage.clientWidth) * rx; lbStage.scrollTop = (lbImg.naturalHeight - lbStage.clientHeight) * ry; });
   }
 });
@@ -467,15 +413,12 @@ document.addEventListener('click', ev => {
   const a = b.dataset.action;
   if (a === 'import') openImport();
   else if (a === 'report') openReport();
-  else if (a === 'backup') doBackup();
-  else if (a === 'restore') openRestore();
+  else if (a === 'refresh') refresh(true);
   else if (a === 'settings') openSettings();
-  else if (a === 'lock') lockApp();
 });
 $('#btn-new').addEventListener('click', () => openNew());
-
 document.addEventListener('keydown', ev => {
-  if (!store.isUnlocked()) return;
+  if (!store.isConnected()) return;
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(ev.target.tagName) || ev.target.isContentEditable;
   if (ev.key === 'Escape') {
     if (!lb.hidden) { closeLightbox(); return; }
@@ -489,48 +432,7 @@ document.addEventListener('keydown', ev => {
   if (ev.key === '/') { ev.preventDefault(); $('#search').focus(); }
   else if (ev.key === 'n' && panel.hidden) { ev.preventDefault(); openNew(); }
 });
-
-// Sauvegarde
-async function doBackup() {
-  try {
-    toast('Préparation de la sauvegarde…');
-    const blob = await store.exportBackup();
-    download(blob, `carnet-${stamp()}.carnet`);
-    $('#backup-banner').hidden = true;
-    toast('Sauvegarde chiffrée téléchargée. Conservez-la en lieu sûr.', 'ok');
-  } catch (e) { toast('Sauvegarde impossible : ' + e.message, 'err'); }
-}
-async function checkBackupReminder() {
-  const last = await store.getPref('lastBackupAt', null);
-  const dismissed = await store.getPref('backupDismissedAt', null);
-  const n = store.listIncidents().length;
-  if (!n) return;
-  const days = last ? (Date.now() - new Date(last).getTime()) / 86400000 : Infinity;
-  const dismissedDays = dismissed ? (Date.now() - new Date(dismissed).getTime()) / 86400000 : Infinity;
-  if (days > 14 && dismissedDays > 3) {
-    $('#backup-banner-text').textContent = last ? `Dernière sauvegarde il y a ${Math.floor(days)} jours. Les données ne vivent que dans ce navigateur.` : 'Aucune sauvegarde pour l\'instant. Les données ne vivent que dans ce navigateur : exportez un fichier chiffré régulièrement.';
-    $('#backup-banner').hidden = false;
-  }
-}
-$('#btn-banner-dismiss').addEventListener('click', async () => { $('#backup-banner').hidden = true; await store.setPref('backupDismissedAt', new Date().toISOString()); });
-
-// Restauration
-function openRestore() { $('#restore-file').value = ''; $('#restore-pass').value = ''; $('#restore-state').textContent = ''; $('#dlg-restore').showModal(); }
-$('#btn-restore-go').addEventListener('click', async () => {
-  const file = $('#restore-file').files[0], pass = $('#restore-pass').value, mode = $('input[name=restore-mode]:checked').value, st = $('#restore-state');
-  if (!file) { st.textContent = 'Choisissez un fichier.'; return; }
-  if (!pass) { st.textContent = 'Saisissez la phrase secrète de la sauvegarde.'; return; }
-  if (mode === 'replace' && !await confirmDlg('Remplacer tout le contenu ?', 'Toutes les fiches et captures actuelles seront supprimées avant la restauration.', 'Remplacer')) return;
-  st.textContent = 'Lecture et déchiffrement…';
-  try {
-    const plain = await store.readBackup(file, pass);
-    st.textContent = `Restauration de ${plain.incidents.length} fiche(s), ${plain.attachments.length} capture(s)…`;
-    const r = await store.restoreBackup(plain, mode);
-    $('#dlg-restore').close();
-    toast(`Restauré : ${r.incidents} fiche(s), ${r.attachments} capture(s).`, 'ok');
-    render();
-  } catch (e) { st.textContent = 'Échec : ' + e.message; }
-});
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && store.isConnected() && panel.hidden) refresh(false); });
 
 // Import Claude
 let importItems = [];
@@ -550,13 +452,15 @@ $('#btn-import-preview').addEventListener('click', () => {
 });
 $('#btn-import-go').addEventListener('click', async () => {
   if (!importItems.length) return;
-  $('#btn-import-go').disabled = true;
-  let ok = 0, firstId = null;
-  for (const it of importItems) { try { const inc = await store.saveIncident(it); ok++; firstId = firstId || inc.id; } catch (e) { console.error(e); } }
-  $('#dlg-import').close();
-  if (ok === importItems.length) toast(`${ok} fiche(s) importée(s) — captures à joindre manuellement.`, 'ok'); else toast(`${ok} / ${importItems.length} fiche(s) importée(s).`, 'err');
-  render();
-  if (ok === 1 && firstId) openEdit(firstId);
+  const btn = $('#btn-import-go'); btn.disabled = true; btn.textContent = 'Envoi…';
+  try {
+    const incs = await store.saveMany(importItems);
+    $('#dlg-import').close();
+    toast(`${incs.length} fiche(s) enregistrée(s) dans le dépôt — captures à joindre manuellement.`, 'ok');
+    render();
+    if (incs.length === 1) openEdit(incs[0].id);
+  } catch (e) { toast('Import NON enregistré : ' + e.message, 'err'); btn.disabled = false; }
+  finally { btn.textContent = 'Importer'; }
 });
 
 // Rapport
@@ -587,34 +491,16 @@ $('#btn-report-go').addEventListener('click', async () => {
 });
 
 // Paramètres
-async function openSettings() {
-  const s = await store.stats(); const last = await store.getPref('lastBackupAt', null);
-  $('#stats').innerHTML = `<dt>Fiches</dt><dd>${s.incidents}</dd><dt>Captures</dt><dd>${s.attachments} (${fmtBytes(s.attachBytes)})</dd><dt>Stockage navigateur</dt><dd>${s.usage != null ? fmtBytes(s.usage) + (s.quota ? ' / ' + fmtBytes(s.quota) : '') : 'inconnu'}</dd><dt>Dernière sauvegarde</dt><dd>${last ? new Date(last).toLocaleString('fr-FR') : 'jamais'}</dd>`;
-  $('#pp-state').textContent = ''; ['#pp-old', '#pp-new', '#pp-new2'].forEach(x => $(x).value = '');
+function openSettings() {
+  const s = store.stats(), cfg = store.getConfig() || {};
+  $('#stats').innerHTML = `<dt>Dépôt</dt><dd><a href="https://github.com/${esc(cfg.owner)}/${esc(cfg.repo)}" target="_blank" rel="noopener">${esc(cfg.owner)}/${esc(cfg.repo)}</a> (${esc(cfg.branch || 'main')})</dd><dt>Fiches</dt><dd>${s.incidents}</dd><dt>Captures</dt><dd>${s.attachments} (${fmtBytes(s.attachBytes)})</dd>`;
   $('#dlg-settings').showModal();
 }
-$('#set-lock').addEventListener('change', async ev => { lockMinutes = Number(ev.target.value); await store.setPref('lockMinutes', lockMinutes); armAutoLock(); });
-$('#btn-pp-go').addEventListener('click', async () => {
-  const o = $('#pp-old').value, n = $('#pp-new').value, n2 = $('#pp-new2').value, st = $('#pp-state');
-  if (n.length < 8) { st.textContent = '8 caractères minimum.'; return; }
-  if (n !== n2) { st.textContent = 'Les deux phrases diffèrent.'; return; }
-  st.textContent = 'Re-chiffrement…';
-  try { await store.changePassphrase(o, n); st.textContent = 'Phrase modifiée.'; toast('Phrase secrète modifiée. Les anciennes sauvegardes restent lisibles avec l\'ancienne phrase.', 'ok'); ['#pp-old', '#pp-new', '#pp-new2'].forEach(x => $(x).value = ''); }
-  catch (e) { st.textContent = e.message; }
+$('#btn-plain-export').addEventListener('click', () => { try { download(new Blob([store.exportPlainJSON()], { type: 'application/json' }), `incidents-${stamp()}.json`); } catch (e) { toast(e.message, 'err'); } });
+$('#btn-disconnect').addEventListener('click', async () => {
+  if (!await confirmDlg('Déconnecter ce navigateur ?', 'Le token sera oublié ici. Les fiches restent dans le dépôt GitHub.', 'Déconnecter')) return;
+  $('#dlg-settings').close(); closePanel(true); store.disconnect(); showGate(); toast('Déconnecté.');
 });
-$('#btn-plain-export').addEventListener('click', () => {
-  try { download(new Blob([store.exportPlainJSON()], { type: 'application/json' }), `carnet-clair-${stamp()}.json`); toast('JSON en clair téléchargé (sans images).'); }
-  catch (e) { toast(e.message, 'err'); }
-});
-$('#btn-wipe').addEventListener('click', async () => {
-  if (!await confirmDlg('Effacer définitivement ?', 'Toutes les fiches, captures et la phrase secrète seront supprimées de cet appareil. Seule une sauvegarde permettra de les retrouver.', 'Tout effacer')) return;
-  $('#dlg-settings').close();
-  await store.wipeEverything();
-  $('#app').hidden = true; $('#gate').hidden = false; $('#gate-unlock').hidden = true; $('#gate-setup').hidden = false;
-  toast('Carnet effacé.');
-});
-
-// Fermer un dialogue en cliquant sur le fond
 $$('dialog').forEach(d => d.addEventListener('click', ev => { if (ev.target === d) d.close('cancel'); }));
 
 boot();
