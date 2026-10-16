@@ -44,6 +44,8 @@ Un tableau nu `[ {...}, {...} ]` ou un incident seul `{...}` sont aussi accepté
 |---|---|---|
 | `date` | `AAAA-MM-JJ` | Obligatoire en pratique ; sinon la date du jour est utilisée et un avertissement s'affiche. |
 | `time` | `HH:MM` | Facultatif. |
+| `evidenceDate` | `AAAA-MM-JJ` | Date de la discussion ou de la preuve, si différente de l'événement (ex. : propos d'hier rapportés aujourd'hui). La recherche par période trouve la fiche par l'une ou l'autre date. |
+| `evidenceTime` | `HH:MM` | Facultatif. |
 | `context` | texte | Lieu, réunion, canal. |
 | `category` | texte | De préférence l'une des catégories de l'application (voir `js/store.js`, `CATEGORIES`). Une valeur inconnue est conservée telle quelle. |
 | `impact` | `faible` · `modere` · `eleve` · `critique` | Défaut : `modere`. |

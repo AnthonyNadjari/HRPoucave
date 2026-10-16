@@ -48,6 +48,7 @@ export async function buildReport(options) {
     <div class="num">${i}</div>
     <div>
       <h3>${esc(fmtDate(inc.date, inc.time))}</h3>
+      ${inc.evidenceDate && inc.evidenceDate !== inc.date ? `<p class="meta">Discussion / preuve du ${esc(fmtDate(inc.evidenceDate, inc.evidenceTime))}</p>` : ''}
       <p class="meta">${esc(inc.category)} · Impact ${esc(impactLabel(inc.impact))}${inc.context ? ' · ' + esc(inc.context) : ''}</p>
     </div>
   </header>

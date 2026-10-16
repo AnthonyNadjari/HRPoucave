@@ -318,3 +318,5 @@ summary.ev-toggle::-webkit-details-marker { display: none; }
 :root { --interp-ink: #8a6d3b; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --interp-ink: #cdb27a; } }
 :root[data-theme="dark"] { --interp-ink: #cdb27a; }
+
+.card .evdate { color: var(--accent); }

@@ -49,6 +49,8 @@ export function claudePrompt() {
     {
       "date": "AAAA-MM-JJ",
       "time": "HH:MM",
+      "evidenceDate": "AAAA-MM-JJ si la discussion ou la preuve date d'un autre jour que l'événement, sinon vide",
+      "evidenceTime": "HH:MM ou vide",
       "context": "Lieu, réunion ou canal (ex. : point hebdo Teams, open space, mail)",
       "category": "une valeur parmi : ${CATEGORIES.join(' | ')}",
       "impact": "faible | modere | eleve | critique",

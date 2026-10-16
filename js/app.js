@@ -98,11 +98,14 @@ function currentList() { return store.listIncidents(); }
 function matches(inc) {
   if (filters.category && inc.category !== filters.category) return false;
   if (filters.impact && inc.impact !== filters.impact) return false;
-  if (filters.from && inc.date < filters.from) return false;
-  if (filters.to && inc.date > filters.to) return false;
+  // Période : la fiche est retenue si la date de l'événement OU celle de la discussion y tombe.
+  if (filters.from || filters.to) {
+    const inRange = d => d && (!filters.from || d >= filters.from) && (!filters.to || d <= filters.to);
+    if (!inRange(inc.date) && !inRange(inc.evidenceDate)) return false;
+  }
   if (filters.evidence && !inc.attachments.length) return false;
   if (filters.q) {
-    const hay = fold([inc.context, inc.category, inc.facts, inc.quotes.join(' '), inc.interpretation, inc.witnesses.join(' '), inc.tags.join(' '), inc.impactNotes, inc.evidenceNote, inc.date].join(' \n '));
+    const hay = fold([inc.context, inc.category, inc.facts, inc.quotes.join(' '), inc.interpretation, inc.witnesses.join(' '), inc.tags.join(' '), inc.impactNotes, inc.evidenceNote, inc.date, inc.evidenceDate].join(' \n '));
     const terms = fold(filters.q).split(/\s+/).filter(Boolean);
     if (!terms.every(t => hay.includes(t))) return false;
   }
@@ -151,6 +154,7 @@ function render() {
   <div>
     ${inc.facts ? `<div class="facts">${highlight(inc.facts)}</div>` : '<div class="facts muted">Aucun fait saisi.</div>'}
     ${inc.quotes.length ? `<div class="quote">« ${highlight(inc.quotes[0])} »${inc.quotes.length > 1 ? ` <span class="hint">+${inc.quotes.length - 1}</span>` : ''}</div>` : ''}
+    ${inc.evidenceDate && inc.evidenceDate !== inc.date ? `<div class="meta"><span class="evdate">Discussion / preuve du ${esc(inc.evidenceDate.split('-').reverse().join('/'))}${inc.evidenceTime ? ' à ' + esc(inc.evidenceTime) : ''}</span></div>` : ''}
     ${(inc.witnesses.length || inc.tags.length) ? `<div class="meta">${inc.witnesses.length ? `<span>Témoins : ${highlight(inc.witnesses.join(', '))}</span>` : ''}${inc.tags.map(t => `<span class="tag">${highlight(t)}</span>`).join('')}</div>` : ''}
   </div>
   ${atts.length ? `<details class="ev" data-id="${inc.id}"><summary class="ev-toggle" role="button">Preuves (${atts.length}) <span class="chev">▾</span></summary><div class="ev-grid"></div></details>` : (inc.evidenceNote ? `<div class="ev hint">Preuve à joindre : ${highlight(inc.evidenceNote)}</div>` : '')}
@@ -223,6 +227,7 @@ function openEdit(id) {
   currentId = id; pendingFiles = []; dirty = false;
   form.reset();
   form.date.value = inc.date; form.time.value = inc.time; form.context.value = inc.context;
+  form.evidenceDate.value = inc.evidenceDate || ''; form.evidenceTime.value = inc.evidenceTime || '';
   if (!CATEGORIES.includes(inc.category)) { const o = document.createElement('option'); o.value = inc.category; o.textContent = inc.category; form.category.appendChild(o); }
   form.category.value = inc.category;
   form.impact.value = inc.impact; form.facts.value = inc.facts; form.quotes.value = inc.quotes.join('\n');
@@ -251,7 +256,7 @@ $('#scrim').addEventListener('click', () => closePanel());
 function readForm() {
   return {
     id: currentId || undefined,
-    date: form.date.value, time: form.time.value, context: form.context.value, category: form.category.value, impact: form.impact.value,
+    date: form.date.value, time: form.time.value, evidenceDate: form.evidenceDate.value, evidenceTime: form.evidenceTime.value, context: form.context.value, category: form.category.value, impact: form.impact.value,
     facts: form.facts.value, quotes: form.quotes.value.split('\n').map(s => s.replace(/^[«"“\s]+|[»"”\s]+$/g, '').trim()).filter(Boolean),
     interpretation: form.interpretation.value, witnesses: form.witnesses.value.split(',').map(s => s.trim()).filter(Boolean),
     tags: form.tags.value.split(',').map(s => s.trim().replace(/^#/, '')).filter(Boolean),

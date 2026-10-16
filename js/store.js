@@ -152,6 +152,9 @@ export function normalizeIncident(x) {
     source: x.source === 'import' ? 'import' : 'manuel',
     date: /^\d{4}-\d{2}-\d{2}$/.test(str(x.date)) ? str(x.date) : new Date().toISOString().slice(0, 10),
     time: /^\d{2}:\d{2}$/.test(str(x.time)) ? str(x.time) : '',
+    // Date à laquelle la discussion a eu lieu ou la preuve a été produite, si différente de l'événement.
+    evidenceDate: /^\d{4}-\d{2}-\d{2}$/.test(str(x.evidenceDate)) ? str(x.evidenceDate) : '',
+    evidenceTime: /^\d{2}:\d{2}$/.test(str(x.evidenceTime)) ? str(x.evidenceTime) : '',
     context: str(x.context),
     category: str(x.category) || 'Autre',
     impact: ['faible', 'modere', 'eleve', 'critique'].includes(x.impact) ? x.impact : 'modere',
